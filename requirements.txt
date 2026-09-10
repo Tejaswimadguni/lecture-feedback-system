@@ -1,7 +1,7 @@
 openai-whisper
 torch
+imageio-ffmpeg
 PyMuPDF
 pypdf
 python-pptx
 pandas
-pytest
