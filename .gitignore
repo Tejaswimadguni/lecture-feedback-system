@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# Dataset
+data/raw/*
+data/processed/*
+
+# Model files
+*.pt
+*.pth
+*.bin
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

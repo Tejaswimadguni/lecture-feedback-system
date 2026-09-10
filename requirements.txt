@@ -1,0 +1,6 @@
+openai-whisper
+torch
+PyMuPDF
+python-pptx
+pandas
+pytest
