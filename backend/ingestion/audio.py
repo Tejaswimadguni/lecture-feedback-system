@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Auto-locate and bind static FFmpeg binary (from imageio-ffmpeg if available)
 try:
+    # pyrefly: ignore [missing-import]
     import imageio_ffmpeg
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
     ffmpeg_dir = os.path.dirname(ffmpeg_bin)
