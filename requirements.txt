@@ -1,6 +1,7 @@
 openai-whisper
 torch
 PyMuPDF
+pypdf
 python-pptx
 pandas
 pytest
