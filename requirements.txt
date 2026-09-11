@@ -1,7 +1,30 @@
-openai-whisper
-torch
-PyMuPDF
-pypdf
-python-pptx
-pandas
-pytest
+# Audio Transcription & Whisper Ingestion
+openai-whisper>=20231117
+torch>=2.0.0
+imageio-ffmpeg>=0.4.9
+
+# Document Processing (PDF & PowerPoint)
+PyMuPDF>=1.23.0
+pypdf>=3.0.0
+python-pptx>=0.6.21
+
+# Data Manipulation & Progress
+numpy>=1.24.0
+pandas>=2.0.0
+tqdm>=4.65.0
+
+# Vector Embeddings & Similarity Search
+sentence-transformers>=2.2.2
+faiss-cpu>=1.7.4
+
+# LLM Claim Extraction & Verification (Google Gemini)
+google-genai>=0.1.1
+python-dotenv>=1.0.0
+
+# Backend Web API (FastAPI)
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+
+# Testing
+pytest>=7.0.0
+

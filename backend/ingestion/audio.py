@@ -12,17 +12,33 @@ from typing import Dict, Any, Optional
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Auto-locate and bind static FFmpeg binary (from imageio-ffmpeg if available)
+def _get_ffmpeg_exe() -> str:
+    """
+    Resolves the ffmpeg executable path.
+    Uses imageio-ffmpeg static binary if available (no system install needed).
+    Falls back to system 'ffmpeg' if imageio_ffmpeg is not installed.
+    """
+    try:
+        # pyrefly: ignore [missing-import]
+        import imageio_ffmpeg
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        # Create ffmpeg.exe alias in the same directory for subprocess compatibility
+        ffmpeg_dir = os.path.dirname(ffmpeg_bin)
+        alias = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+        if not os.path.exists(alias) and os.path.exists(ffmpeg_bin):
+            shutil.copyfile(ffmpeg_bin, alias)
+        return alias if os.path.exists(alias) else ffmpeg_bin
+    except Exception:
+        return "ffmpeg"  # Fall back to system ffmpeg on PATH
+
+
+# Inject ffmpeg directory into PATH at module load time.
+# This ensures Whisper's own internal load_audio() subprocess call also finds ffmpeg.
 try:
-    # pyrefly: ignore [missing-import]
-    import imageio_ffmpeg
-    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
-    ffmpeg_dir = os.path.dirname(ffmpeg_bin)
-    target_ffmpeg_exe = os.path.join(ffmpeg_dir, "ffmpeg.exe")
-    if not os.path.exists(target_ffmpeg_exe) and os.path.exists(ffmpeg_bin):
-        shutil.copyfile(ffmpeg_bin, target_ffmpeg_exe)
-    if ffmpeg_dir not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = ffmpeg_dir + os.path.pathsep + os.environ.get("PATH", "")
+    _ffmpeg_resolved = _get_ffmpeg_exe()
+    _ffmpeg_dir = os.path.dirname(_ffmpeg_resolved)
+    if _ffmpeg_dir and _ffmpeg_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 except Exception:
     pass
 
@@ -39,7 +55,8 @@ def get_audio_duration(audio_path: str) -> float:
     Gets total duration of an audio/video file in seconds using ffmpeg.
     Supports both HH:MM:SS.ms and HH:MM:SS duration formats.
     """
-    cmd = ["ffmpeg", "-i", audio_path]
+    ffmpeg_exe = _get_ffmpeg_exe()
+    cmd = [ffmpeg_exe, "-i", audio_path]
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
     _, stderr = process.communicate()
     
@@ -115,7 +132,7 @@ def transcribe_audio(
                 
                 # Extract 16kHz mono WAV chunk using ffmpeg
                 cmd = [
-                    "ffmpeg", "-y", "-ss", str(current_start), "-t", str(chunk_length_sec),
+                    _get_ffmpeg_exe(), "-y", "-ss", str(current_start), "-t", str(chunk_length_sec),
                     "-i", audio_path, "-ar", "16000", "-ac", "1", chunk_file
                 ]
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -194,22 +211,29 @@ def save_transcript_json(
     return output_path
 
 
-def find_default_raw_audio() -> Optional[str]:
-    """Finds the first available raw audio or video file in data/raw/audio or data/raw/video."""
+def find_all_raw_audio() -> list[str]:
+    """Finds all available raw audio or video files in data/raw/audio or data/raw/video."""
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     search_dirs = [
         os.path.join(base_dir, "data", "raw", "audio"),
         os.path.join(base_dir, "data", "raw", "video"),
     ]
     valid_extensions = {".mp3", ".mp4", ".wav", ".m4a", ".flac", ".ogg", ".mkv"}
+    discovered = []
 
     for search_dir in search_dirs:
         if os.path.exists(search_dir):
-            for filename in os.listdir(search_dir):
+            for filename in sorted(os.listdir(search_dir)):
                 ext = os.path.splitext(filename)[1].lower()
                 if ext in valid_extensions:
-                    return os.path.join(search_dir, filename)
-    return None
+                    discovered.append(os.path.join(search_dir, filename))
+    return discovered
+
+
+def find_default_raw_audio() -> Optional[str]:
+    """Finds the first available raw audio or video file in data/raw/audio or data/raw/video."""
+    all_files = find_all_raw_audio()
+    return all_files[0] if all_files else None
 
 
 def main():
@@ -223,10 +247,29 @@ def main():
         help="Path to input audio/video file (e.g., .mp4, .mp3, .wav). If omitted, scans data/raw/ for files."
     )
     parser.add_argument("--output", "-o", help="Optional path to output JSON file")
-    parser.add_argument("--model", "-m", default="base", help="Whisper model size (default: base)")
+    parser.add_argument("--model", "-m", default="base", help="Whisper model size: tiny, base, small, medium (default: base)")
     parser.add_argument("--lecture-id", "-l", help="Optional lecture ID")
+    parser.add_argument("--all", "-a", action="store_true", help="Batch process all audio/video files found in data/raw/")
 
     args = parser.parse_args()
+
+    # Batch process all files if requested
+    if args.all:
+        files = find_all_raw_audio()
+        if not files:
+            logger.error("No audio/video files found in data/raw/audio or data/raw/video.")
+            return
+        logger.info(f"Found {len(files)} files to transcribe: {[os.path.basename(f) for f in files]}")
+        for filepath in files:
+            try:
+                lid = derive_lecture_id(filepath)
+                logger.info(f"=== Starting transcription for: {os.path.basename(filepath)} (ID: {lid}) ===")
+                saved_path = save_transcript_json(filepath, model_size=args.model, lecture_id=lid)
+                logger.info(f"Finished: {saved_path}")
+            except Exception as e:
+                logger.error(f"Failed to transcribe {filepath}: {e}", exc_info=True)
+        return
+
     audio_path = args.audio_path
 
     if not audio_path:
@@ -237,7 +280,8 @@ def main():
             logger.error("No audio_path specified and no audio/video files found in data/raw/audio or data/raw/video.")
             print("\nUsage example:")
             print("  python backend/ingestion/audio.py data/raw/audio/lecture_01.mp3")
-            print("  python backend/ingestion/audio.py data/raw/video/lecture_01.mp4 --lecture-id lecture_01")
+            print("  python backend/ingestion/audio.py data/raw/video/lecture_02.mp4 --lecture-id lecture_02")
+            print("  python backend/ingestion/audio.py --all --model tiny")
             return
 
     try:
@@ -250,6 +294,7 @@ def main():
         logger.info(f"Successfully transcribed audio into JSON: {saved_path}")
     except Exception as e:
         logger.error(f"Error processing audio: {e}", exc_info=True)
+
 
 if __name__ == "__main__":
     main()
