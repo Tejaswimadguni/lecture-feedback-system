@@ -9,7 +9,19 @@ Python-based processing, retrieval, and verification engine for the Lecture Feed
 - **`retrival/`**: Dense text embedding generation (`sentence-transformers` with `all-MiniLM-L6-v2`) and cosine similarity indexing using FAISS.
 - **`verification/`**: Student claim extraction from CSV reflections, FAISS evidence retrieval, Google Gemini LLM factual verification, and multi-factor scoring.
 
-## Quick Commands
+## Master Pipeline (Single Command)
+
+To run the complete ingestion, processing, and vector indexing pipeline for a lecture in one go:
+
+```bash
+python backend/run_lecture_pipeline.py \
+    --audio data/raw/audio/6100l-lecture-1-version-2_360p_16_9.mp3 \
+    --pdf data/raw/pdf/mit6_100l_f22_lec01.pdf \
+    --course-id MIT_6_100L \
+    --lecture-id lec01
+```
+
+## Individual Module Commands (Alternative)
 
 From the project root:
 

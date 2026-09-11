@@ -133,9 +133,38 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 ---
 
-## Step-by-Step Pipeline Execution
+## Quick Start: Single-Command Master Pipeline
 
-Run all commands from the root directory of the repository:
+You can execute the entire lecture ingestion, cleaning, chunking, and FAISS vector indexing pipeline in a **single command** using `backend/run_lecture_pipeline.py`:
+
+```bash
+python backend/run_lecture_pipeline.py \
+    --audio data/raw/audio/6100l-lecture-1-version-2_360p_16_9.mp3 \
+    --pdf data/raw/pdf/mit6_100l_f22_lec01.pdf \
+    --course-id MIT_6_100L \
+    --lecture-id lec01
+```
+
+### Available Pipeline Flags:
+| Argument | Description | Default |
+|---|---|---|
+| `--audio <path>` | Path to lecture audio/video file (`.mp3`, `.mp4`, `.wav`) | *Sample MP3 if present* |
+| `--pdf <path>` | Path to lecture notes/slides PDF | *Sample PDF if present* |
+| `--course-id <id>` | Course identifier | `MIT_6_100L` |
+| `--lecture-id <id>` | Lecture identifier | Derived from filename or `lec01` |
+| `--course-name <name>`| Human-readable course name | `Introduction to CS` |
+| `--lecture-title <title>`| Lecture title | `Introduction` |
+| `--whisper-model <size>`| Whisper model (`tiny`, `base`, `small`, `medium`, `large`) | `base` |
+| `--force-rebuild` | Wipe existing vector index and rebuild from scratch | `False` (incremental deduplication) |
+
+> **Directory Management & Deduplication:**
+> The master pipeline automatically creates `data/processed/transcripts/`, `data/processed/pdf_text/`, `data/processed/metadata/`, and `data/vector_store/`. Rerunning the pipeline for the same lecture updates existing chunks in the FAISS index and chunk mapping without creating duplicate entries.
+
+---
+
+## Individual Step-by-Step Pipeline Execution (Alternative)
+
+If you prefer to run individual modules manually:
 
 ### Step 1: Ingestion (Extract text from audio and slides)
 
