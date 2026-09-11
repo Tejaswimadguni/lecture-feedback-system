@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 
+# pyrefly: ignore [missing-import]
 from google import genai
 
 
