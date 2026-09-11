@@ -18,6 +18,11 @@ from tests.test_metadata import (
     test_invalid_chunk_metadata_raises,
     test_build_dataset_metadata,
 )
+from tests.test_retrieval import (
+    test_embedding_model_shape_and_similarity,
+    test_vector_store_build_search_and_filter,
+    test_semantic_search_end_to_end,
+)
 
 
 def run_all_tests():
@@ -30,13 +35,16 @@ def run_all_tests():
         ("test_pdf_chunk_metadata_schema", test_pdf_chunk_metadata_schema),
         ("test_invalid_chunk_metadata_raises", test_invalid_chunk_metadata_raises),
         ("test_build_dataset_metadata", test_build_dataset_metadata),
+        ("test_embedding_model_shape_and_similarity", test_embedding_model_shape_and_similarity),
+        ("test_vector_store_build_search_and_filter", test_vector_store_build_search_and_filter),
+        ("test_semantic_search_end_to_end", test_semantic_search_end_to_end),
     ]
 
     passed = 0
     failed = 0
 
     print("=========================================")
-    print(" Running Section 2 Tests ")
+    print(" Running Full Test Suite (Section 2 + Section 3) ")
     print("=========================================")
 
     for name, func in test_functions:
