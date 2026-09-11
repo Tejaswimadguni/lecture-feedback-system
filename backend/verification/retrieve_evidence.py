@@ -128,8 +128,9 @@ def retrieve_evidence(
                     f"{evidence[0]['end_time']:.2f}"
                 )
 
+            safe_text = evidence[0]['text'].replace('\uf0a7', '-').encode('ascii', errors='backslashreplace').decode('ascii')
             print(
-                f"Text: {evidence[0]['text']}"
+                f"Text: {safe_text[:120]}..."
             )
 
     return results
@@ -139,72 +140,53 @@ def retrieve_evidence(
 # Main
 # --------------------------------------------------
 
-def main():
-
+def main(target_roll_number=None):
     print("\n===================================")
-    print("CLAIM → EVIDENCE RETRIEVAL")
+    print("CLAIM -> EVIDENCE RETRIEVAL")
     print("===================================")
 
-    print("\nLoading claims...")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    data = load_claims(
-        CLAIMS_FILE
-    )
+    if target_roll_number is not None:
+        claim_files = [OUTPUT_DIR / f"student_{int(target_roll_number):02d}_claims.json"]
+    else:
+        claim_files = sorted(list(OUTPUT_DIR.glob("student_*_claims.json")))
 
-    roll_number = data["roll_number"]
-    claims = data["claims"]
+    if not claim_files and CLAIMS_FILE.exists():
+        claim_files = [CLAIMS_FILE]
 
-    print(
-        f"Roll number: {roll_number}"
-    )
+    print(f"\nFound {len(claim_files)} claim files to process...")
 
-    print(
-        f"Total claims: {len(claims)}"
-    )
+    for c_file in claim_files:
+        if not c_file.exists():
+            continue
 
-    print("\nRetrieving evidence...")
+        data = load_claims(c_file)
+        roll_number = data.get("roll_number", 1)
+        claims = data.get("claims", [])
 
-    results = retrieve_evidence(
-        claims,
-        top_k=5
-    )
+        print(f"\nRetrieving evidence for Roll No. {roll_number} ({len(claims)} claims)...")
+        results = retrieve_evidence(claims, top_k=5)
 
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+        output = {
+            "roll_number": roll_number,
+            "total_claims": len(claims),
+            "claims": results
+        }
 
-    output = {
-        "roll_number": roll_number,
-        "total_claims": len(claims),
-        "claims": results
-    }
+        out_file = OUTPUT_DIR / f"student_{roll_number:02d}_evidence.json"
+        with open(out_file, "w", encoding="utf-8") as file:
+            json.dump(output, file, indent=2, ensure_ascii=False)
 
-    with open(
-        OUTPUT_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            output,
-            file,
-            indent=2,
-            ensure_ascii=False
-        )
+        if roll_number == 1:
+            with open(OUTPUT_FILE, "w", encoding="utf-8") as file:
+                json.dump(output, file, indent=2, ensure_ascii=False)
 
     print("\n===================================")
     print("EVIDENCE RETRIEVAL COMPLETE")
+    print(f"Processed {len(claim_files)} students. Saved to {OUTPUT_DIR}")
     print("===================================")
-
-    print(
-        f"\nEvidence saved to:"
-    )
-
-    print(
-        OUTPUT_FILE
-    )
 
 
 if __name__ == "__main__":
-    main()
+    main()
