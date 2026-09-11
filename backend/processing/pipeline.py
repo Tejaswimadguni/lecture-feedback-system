@@ -161,7 +161,7 @@ def run_section2_pipeline() -> Dict[str, Any]:
         all_chunks.extend(t_chunks)
 
     # Process PDF if available
-    raw_pdf_candidate = os.path.join(pdf_text_dir, "lecture_01_notes.json")
+    raw_pdf_candidate = os.path.join(pdf_text_dir, "mit6_100l_f22_lec01_notes.json")
     if not os.path.exists(raw_pdf_candidate):
         raw_pdf_candidate = os.path.join(pdf_text_dir, "lecture_01_raw.json")
 
