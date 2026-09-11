@@ -18,6 +18,7 @@ class EmbeddingModel:
         """Lazy loader for SentenceTransformer model."""
         if self._model is None:
             try:
+                # pyrefly: ignore [missing-import]
                 from sentence_transformers import SentenceTransformer
                 self._model = SentenceTransformer(self.model_name)
             except ImportError as e:
