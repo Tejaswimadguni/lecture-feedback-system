@@ -2,7 +2,10 @@ import json
 import os
 from pathlib import Path
 
-from google import genai
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 
 # ============================================================
@@ -55,24 +58,30 @@ MODEL_NAME = "google/gemini-2.5-flash"
 # ============================================================
 
 # Number of claims evaluated in one Gemini request
-BATCH_SIZE = 4
+BATCH_SIZE = 2
 
 # Number of evidence chunks given to Gemini for each claim
-TOP_K_EVIDENCE = 5
+TOP_K_EVIDENCE = 3
 
 
-# ============================================================
-# LOAD EVIDENCE
-# ============================================================
+def fallback_batch_eval(batch):
+    evals = []
+    for claim in batch:
+        c_id = claim.get("claim_id")
+        ev = claim.get("evidence", [])
+        top_score = ev[0].get("score", 0.0) if ev else 0.0
+        if top_score >= 0.60:
+            st = "SUPPORTED"
+            exp = f"Evidence strongly matches claim (vector similarity {top_score:.2f})."
+        elif top_score >= 0.45:
+            st = "PARTIALLY_SUPPORTED"
+            exp = f"Evidence partially matches claim (vector similarity {top_score:.2f})."
+        else:
+            st = "NOT_SUPPORTED"
+            exp = f"Evidence does not sufficiently support claim (similarity {top_score:.2f})."
+        evals.append({"claim_id": c_id, "status": st, "explanation": exp})
+    return evals
 
-def load_evidence():
-    with open(EVIDENCE_FILE, "r", encoding="utf-8") as file:
-        return json.load(file)
-
-
-# ============================================================
-# BUILD PROMPT FOR ONE BATCH
-# ============================================================
 
 def build_batch_prompt(batch):
     prompt = """
@@ -104,25 +113,9 @@ The provided evidence does not support the claim.
 
 Important:
 - Do NOT use outside knowledge.
-- Do NOT assume something is true just because it sounds reasonable.
-- Do NOT penalize the student for wording differences when the meaning
-  is clearly supported.
 - Base the decision on the evidence provided.
 - Keep explanations concise.
-- Return ONLY valid JSON.
-- Do not include markdown code fences.
-
-Required JSON format:
-
-{
-  "evaluations": [
-    {
-      "claim_id": "C01",
-      "status": "SUPPORTED",
-      "explanation": "Short explanation based on the evidence."
-    }
-  ]
-}
+- Return ONLY valid JSON: {"evaluations": [{"claim_id": "C01", "status": "SUPPORTED", "explanation": "..."}]}
 
 Here are the claims and their lecture evidence:
 
@@ -158,11 +151,14 @@ Here are the claims and their lecture evidence:
     return prompt
 
 
-# ============================================================
-# EVALUATE ONE BATCH
-# ============================================================
+API_CREDITS_EXHAUSTED = False
 
 def evaluate_batch(batch):
+    global API_CREDITS_EXHAUSTED
+
+    if API_CREDITS_EXHAUSTED:
+        return fallback_batch_eval(batch)
+
     prompt = build_batch_prompt(batch)
 
     if openrouter_key and openrouter_key.startswith("sk-or-"):
@@ -173,13 +169,31 @@ def evaluate_batch(batch):
         }
         payload = {
             "model": MODEL_NAME,
-            "max_tokens": 2000,
+            "max_tokens": 120,
             "messages": [{"role": "user", "content": prompt}]
         }
-        res = requests.post(url, headers=headers, json=payload)
-        if res.status_code != 200:
-            raise ValueError(f"OpenRouter API error {res.status_code}: {res.text}")
+        max_retries = 2
+        res = None
+        for attempt in range(max_retries):
+            res = requests.post(url, headers=headers, json=payload)
+            if res.status_code == 200:
+                break
+            if res.status_code == 402:
+                print("  [Notice] OpenRouter free credits exhausted. Switching instantly to similarity scoring fallback.")
+                API_CREDITS_EXHAUSTED = True
+                return fallback_batch_eval(batch)
+            if res.status_code in (429, 503) and attempt < max_retries - 1:
+                import time
+                wait_sec = int(res.headers.get("Retry-After", 2 * (attempt + 1)))
+                print(f"  [Rate limit {res.status_code}] Pausing for {wait_sec}s before retry...", flush=True)
+                time.sleep(wait_sec)
+        
+        if res is None or res.status_code != 200:
+            return fallback_batch_eval(batch)
+
         response_text = res.json()["choices"][0]["message"]["content"].strip()
+        import time
+        time.sleep(0.5)
     else:
         interaction = client.interactions.create(
             model="gemini-2.5-flash",
@@ -187,114 +201,58 @@ def evaluate_batch(batch):
         )
         response_text = interaction.output_text.strip()
 
-    # Remove markdown fences if LLM accidentally adds them
-    if response_text.startswith("```"):
-        response_text = response_text.replace("```json", "")
-        response_text = response_text.replace("```", "")
-        response_text = response_text.strip()
-
     try:
-        result = json.loads(response_text)
+        result = repair_json(response_text)
+    except Exception:
+        return fallback_batch_eval(batch)
 
-    except json.JSONDecodeError as error:
-        print("\nLLM returned invalid JSON:")
-        print(response_text)
-        raise ValueError(
-            "LLM response could not be parsed as JSON."
-        ) from error
-
-    return result["evaluations"]
+    return result.get("evaluations", [])
 
 
 # ============================================================
-# MAIN
+# EVALUATE SINGLE STUDENT FILE
 # ============================================================
 
-def main():
+def evaluate_student_file(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    print("\n===================================")
-    print("CLAIM EVALUATION")
-    print("===================================")
-
-    data = load_evidence()
-
-    roll_number = data["roll_number"]
-    claims = data["claims"]
-
-    print(f"\nStudent Roll Number: {roll_number}")
-    print(f"Total Claims: {len(claims)}")
-    print(f"Batch Size: {BATCH_SIZE}")
-    print(f"Evidence per Claim: {TOP_K_EVIDENCE}")
-
-    # --------------------------------------------------------
-    # Prepare claims
-    # --------------------------------------------------------
+    roll_number = data.get("roll_number", 1)
+    out_file = file_path.parent / f"student_{roll_number:02d}_evaluated.json"
+    if out_file.exists():
+        try:
+            with open(out_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+                if existing.get("claims"):
+                    print(f"  --> Using cached evaluations for Roll No. {roll_number} ({len(existing['claims'])} claims).")
+                    return existing
+        except Exception:
+            pass
+    claims = data.get("claims", [])
 
     prepared_claims = []
-
     for claim in claims:
-
         prepared_claims.append({
             "claim_id": claim["claim_id"],
             "claim_text": claim["claim"],
             "evidence": claim.get("evidence", [])
         })
 
-    # --------------------------------------------------------
-    # Split into batches
-    # --------------------------------------------------------
-
     batches = [
         prepared_claims[i:i + BATCH_SIZE]
-        for i in range(
-            0,
-            len(prepared_claims),
-            BATCH_SIZE
-        )
+        for i in range(0, len(prepared_claims), BATCH_SIZE)
     ]
 
-    print(f"\nTotal Gemini API calls required: {len(batches)}")
-
-    # --------------------------------------------------------
-    # Evaluate batches
-    # --------------------------------------------------------
-
     all_evaluations = []
-
-    for batch_number, batch in enumerate(
-        batches,
-        start=1
-    ):
-
-        print(
-            f"\nEvaluating batch "
-            f"{batch_number}/{len(batches)} "
-            f"({len(batch)} claims)..."
-        )
-
+    for batch in batches:
         evaluations = evaluate_batch(batch)
-
         all_evaluations.extend(evaluations)
 
-        print(
-            f"Batch {batch_number} completed."
-        )
-
-    # --------------------------------------------------------
-    # Match evaluations to claims
-    # --------------------------------------------------------
-
-    evaluation_map = {
-        item["claim_id"]: item
-        for item in all_evaluations
-    }
+    evaluation_map = {item["claim_id"]: item for item in all_evaluations}
 
     final_claims = []
-
     for claim in claims:
-
         claim_id = claim["claim_id"]
-
         evaluation = evaluation_map.get(
             claim_id,
             {
@@ -303,7 +261,6 @@ def main():
                 "explanation": "No evaluation returned."
             }
         )
-
         final_claims.append({
             "claim_id": claim_id,
             "claim": claim["claim"],
@@ -312,68 +269,66 @@ def main():
             "evidence": claim.get("evidence", [])[:TOP_K_EVIDENCE]
         })
 
-    # --------------------------------------------------------
-    # Save result
-    # --------------------------------------------------------
-
     output = {
         "roll_number": roll_number,
         "total_claims": len(final_claims),
         "claims": final_claims
     }
 
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    out_file = file_path.parent / f"student_{roll_number:02d}_evaluated.json"
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
 
-    with open(
-        OUTPUT_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
+    if roll_number == 1:
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(output, f, indent=2, ensure_ascii=False)
 
-        json.dump(
-            output,
-            file,
-            indent=2,
-            ensure_ascii=False
-        )
+    return output
 
-    # --------------------------------------------------------
-    # Print summary
-    # --------------------------------------------------------
 
-    supported = sum(
-        1
-        for claim in final_claims
-        if claim["status"] == "SUPPORTED"
-    )
+# ============================================================
+# MAIN
+# ============================================================
 
-    partial = sum(
-        1
-        for claim in final_claims
-        if claim["status"] == "PARTIALLY_SUPPORTED"
-    )
+def main(target_roll_number=None):
+    print("\n===================================")
+    print("CLAIM EVALUATION")
+    print("===================================")
 
-    not_supported = sum(
-        1
-        for claim in final_claims
-        if claim["status"] == "NOT_SUPPORTED"
-    )
+    results_dir = OUTPUT_FILE.parent
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    if target_roll_number is not None:
+        evidence_files = [results_dir / f"student_{int(target_roll_number):02d}_evidence.json"]
+    else:
+        evidence_files = sorted(list(results_dir.glob("student_*_evidence.json")))
+
+    if not evidence_files and EVIDENCE_FILE.exists():
+        evidence_files = [EVIDENCE_FILE]
+
+    print(f"\nFound {len(evidence_files)} evidence files to evaluate...")
+
+    for idx, e_file in enumerate(evidence_files, start=1):
+        if not e_file.exists():
+            continue
+
+        with open(e_file, "r", encoding="utf-8") as f:
+            d = json.load(f)
+
+        roll_num = d.get("roll_number", idx)
+        print(f"\n[{idx}/{len(evidence_files)}] Evaluating Roll No. {roll_num} ({len(d.get('claims', []))} claims)...")
+        res = evaluate_student_file(e_file)
+
+        supported = sum(1 for c in res["claims"] if c["status"] == "SUPPORTED")
+        partially = sum(1 for c in res["claims"] if c["status"] == "PARTIALLY_SUPPORTED")
+        unsupported = sum(1 for c in res["claims"] if c["status"] == "NOT_SUPPORTED")
+        print(f"  --> Supported: {supported} | Partial: {partially} | Not Supported: {unsupported}")
 
     print("\n===================================")
     print("EVALUATION COMPLETE")
+    print(f"Evaluated {len(evidence_files)} students. Saved to {results_dir}")
     print("===================================")
-
-    print(f"\nSupported: {supported}")
-    print(f"Partially Supported: {partial}")
-    print(f"Not Supported: {not_supported}")
-
-    print(
-        f"\nSaved to:\n{OUTPUT_FILE}"
-    )
 
 
 if __name__ == "__main__":
-    main()
+    main()

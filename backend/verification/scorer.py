@@ -59,242 +59,194 @@ def load_evaluated_data():
 
 
 # ============================================================
+# CORE LECTURE TOPICS FOR COVERAGE METRIC
+# ============================================================
+
+CORE_LECTURE_TOPICS = {
+    "course_expectations": ["expectation", "practice", "pset", "finger exercise", "office hours", "exam"],
+    "computational_thinking": ["computational thinking", "computation", "problem solving"],
+    "declarative_vs_imperative": ["declarative", "imperative", "recipe", "fact"],
+    "algorithm_square_root": ["algorithm", "square root", "square-root", "guess", "checking", "improve", "stopping condition"],
+    "computer_architecture": ["alu", "memory", "control unit", "instruction", "computer execution"],
+    "stored_program_turing": ["turing", "stored program", "fixed program", "primitive operation"],
+    "language_syntax_semantics": ["syntax", "static semantics", "semantics", "primitive construct"],
+    "python_objects_types": ["object", "type", "int", "float", "bool", "nonetype", "scalar"],
+    "expressions_operators": ["expression", "operator", "precedence", "casting", "conversion"],
+    "variables_assignment_rebinding": ["variable", "assignment", "rebinding", "python tutor", "debugging"]
+}
+
+
+# ============================================================
 # CALCULATE FACTUAL ACCURACY
 # ============================================================
 
 def calculate_accuracy(claims):
-
     if not claims:
         return 0.0
 
     total_score = 0.0
-
     for claim in claims:
-
-        status = claim["status"]
-
-        score = STATUS_SCORE.get(
-            status,
-            0.0
-        )
-
+        status = claim.get("status", "NOT_SUPPORTED")
+        score = STATUS_SCORE.get(status, 0.0)
         total_score += score
 
-    maximum_score = len(claims)
+    accuracy_score = (total_score / len(claims)) * ACCURACY_MAX
+    return round(accuracy_score, 2)
 
-    accuracy_score = (
-        total_score / maximum_score
-    ) * ACCURACY_MAX
 
-    return round(
-        accuracy_score,
-        2
-    )
+# ============================================================
+# CALCULATE LECTURE COVERAGE
+# ============================================================
+
+def calculate_coverage(claims):
+    valid_claims = [c for c in claims if c.get("status") in ("SUPPORTED", "PARTIALLY_SUPPORTED")]
+    if not valid_claims:
+        return 0.0
+
+    all_text = " ".join([c.get("claim", "").lower() for c in valid_claims])
+
+    covered_topics = 0
+    for topic, keywords in CORE_LECTURE_TOPICS.items():
+        if any(kw in all_text for kw in keywords):
+            covered_topics += 1
+
+    coverage_score = (covered_topics / len(CORE_LECTURE_TOPICS)) * COVERAGE_MAX
+    return round(coverage_score, 2)
+
+
+# ============================================================
+# CALCULATE UNDERSTANDING QUALITY
+# ============================================================
+
+def calculate_understanding(claims):
+    if not claims:
+        return 0.0
+
+    supported_count = sum(1 for c in claims if c.get("status") == "SUPPORTED")
+    partially_count = sum(1 for c in claims if c.get("status") == "PARTIALLY_SUPPORTED")
+    total = len(claims)
+
+    accuracy_ratio = (supported_count + 0.5 * partially_count) / total
+    depth_ratio = min(1.0, total / 15.0)
+
+    understanding_score = (0.6 * accuracy_ratio + 0.4 * depth_ratio) * UNDERSTANDING_MAX
+    return round(understanding_score, 2)
+
+
+# ============================================================
+# SCORE SINGLE STUDENT DATA
+# ============================================================
+
+def score_student_data(data):
+    roll_number = data.get("roll_number", 1)
+    claims = data.get("claims", [])
+
+    supported = sum(1 for claim in claims if claim.get("status") == "SUPPORTED")
+    partially_supported = sum(1 for claim in claims if claim.get("status") == "PARTIALLY_SUPPORTED")
+    not_supported = sum(1 for claim in claims if claim.get("status") == "NOT_SUPPORTED")
+
+    accuracy_score = calculate_accuracy(claims)
+    coverage_score = calculate_coverage(claims)
+    understanding_score = calculate_understanding(claims)
+
+    total_score = round(accuracy_score + coverage_score + understanding_score, 2)
+
+    output = {
+        "roll_number": roll_number,
+        "total_claims": len(claims),
+        "claim_statistics": {
+            "supported": supported,
+            "partially_supported": partially_supported,
+            "not_supported": not_supported
+        },
+        "scores": {
+            "factual_accuracy": {
+                "score": accuracy_score,
+                "maximum": ACCURACY_MAX
+            },
+            "lecture_coverage": {
+                "score": coverage_score,
+                "maximum": COVERAGE_MAX
+            },
+            "understanding_quality": {
+                "score": understanding_score,
+                "maximum": UNDERSTANDING_MAX
+            },
+            "total": {
+                "score": total_score,
+                "maximum": 10
+            }
+        }
+    }
+    return output
 
 
 # ============================================================
 # MAIN
 # ============================================================
 
-def main():
-
+def main(target_roll_number=None):
     print("\n===================================")
     print("STUDENT SCORING")
     print("===================================")
 
-    data = load_evaluated_data()
+    results_dir = OUTPUT_FILE.parent
+    results_dir.mkdir(parents=True, exist_ok=True)
 
-    roll_number = data["roll_number"]
-    claims = data["claims"]
+    if target_roll_number is not None:
+        eval_files = [results_dir / f"student_{int(target_roll_number):02d}_evaluated.json"]
+    else:
+        eval_files = sorted(list(results_dir.glob("student_*_evaluated.json")))
 
-    print(
-        f"\nStudent Roll Number: {roll_number}"
-    )
+    if not eval_files and EVALUATED_FILE.exists():
+        eval_files = [EVALUATED_FILE]
 
-    print(
-        f"Total Claims: {len(claims)}"
-    )
+    print(f"\nFound {len(eval_files)} evaluation files to score...")
 
-    # --------------------------------------------------------
-    # Count claim statuses
-    # --------------------------------------------------------
+    summary_list = []
 
-    supported = sum(
-        1
-        for claim in claims
-        if claim["status"] == "SUPPORTED"
-    )
+    for idx, e_file in enumerate(eval_files, start=1):
+        if not e_file.exists():
+            continue
 
-    partially_supported = sum(
-        1
-        for claim in claims
-        if claim["status"] == "PARTIALLY_SUPPORTED"
-    )
+        with open(e_file, "r", encoding="utf-8") as f:
+            d = json.load(f)
 
-    not_supported = sum(
-        1
-        for claim in claims
-        if claim["status"] == "NOT_SUPPORTED"
-    )
+        res = score_student_data(d)
+        roll_num = res["roll_number"]
 
-    # --------------------------------------------------------
-    # Accuracy
-    # --------------------------------------------------------
+        out_file = results_dir / f"student_{roll_num:02d}_score.json"
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(res, f, indent=2, ensure_ascii=False)
 
-    accuracy_score = calculate_accuracy(
-        claims
-    )
+        if roll_num == 1:
+            with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+                json.dump(res, f, indent=2, ensure_ascii=False)
 
-    # --------------------------------------------------------
-    # Coverage
-    #
-    # Not calculated yet.
-    # We will implement this after defining
-    # lecture-level concepts.
-    # --------------------------------------------------------
+        summary_list.append({
+            "roll_number": roll_num,
+            "total_claims": res["total_claims"],
+            "supported": res["claim_statistics"]["supported"],
+            "partially_supported": res["claim_statistics"]["partially_supported"],
+            "not_supported": res["claim_statistics"]["not_supported"],
+            "accuracy_score": res["scores"]["factual_accuracy"]["score"],
+            "coverage_score": res["scores"]["lecture_coverage"]["score"],
+            "understanding_score": res["scores"]["understanding_quality"]["score"],
+            "total_score": res["scores"]["total"]["score"]
+        })
 
-    coverage_score = 0.0
+        print(f"\n[{idx}/{len(eval_files)}] Roll No. {roll_num}: Accuracy: {res['scores']['factual_accuracy']['score']}/5 | Coverage: {res['scores']['lecture_coverage']['score']}/3 | Understanding: {res['scores']['understanding_quality']['score']}/2 | TOTAL: {res['scores']['total']['score']}/10")
 
-    # --------------------------------------------------------
-    # Understanding
-    #
-    # Not calculated yet.
-    # We will implement this after deciding
-    # how to measure explanation quality.
-    # --------------------------------------------------------
+    # Save summary for all students
+    all_summary_path = results_dir / "all_students_summary.json"
+    with open(all_summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary_list, f, indent=2, ensure_ascii=False)
 
-    understanding_score = 0.0
-
-    # --------------------------------------------------------
-    # Total
-    # --------------------------------------------------------
-
-    total_score = (
-        accuracy_score
-        + coverage_score
-        + understanding_score
-    )
-
-    # --------------------------------------------------------
-    # Output
-    # --------------------------------------------------------
-
-    output = {
-
-        "roll_number": roll_number,
-
-        "total_claims": len(claims),
-
-        "claim_statistics": {
-
-            "supported": supported,
-
-            "partially_supported":
-                partially_supported,
-
-            "not_supported":
-                not_supported
-        },
-
-        "scores": {
-
-            "factual_accuracy": {
-                "score": accuracy_score,
-                "maximum": ACCURACY_MAX
-            },
-
-            "lecture_coverage": {
-                "score": coverage_score,
-                "maximum": COVERAGE_MAX
-            },
-
-            "understanding_quality": {
-                "score": understanding_score,
-                "maximum": UNDERSTANDING_MAX
-            },
-
-            "total": {
-                "score": round(
-                    total_score,
-                    2
-                ),
-                "maximum": 10
-            }
-        }
-    }
-
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
-
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    with open(
-        OUTPUT_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            output,
-            file,
-            indent=2,
-            ensure_ascii=False
-        )
-
-    # --------------------------------------------------------
-    # Print
-    # --------------------------------------------------------
-
-    print("\n-----------------------------------")
-    print("CLAIM STATISTICS")
-    print("-----------------------------------")
-
-    print(
-        f"Supported: {supported}"
-    )
-
-    print(
-        f"Partially Supported: "
-        f"{partially_supported}"
-    )
-
-    print(
-        f"Not Supported: {not_supported}"
-    )
-
-    print("\n-----------------------------------")
-    print("SCORE")
-    print("-----------------------------------")
-
-    print(
-        f"Factual Accuracy: "
-        f"{accuracy_score}/{ACCURACY_MAX}"
-    )
-
-    print(
-        f"Lecture Coverage: "
-        f"{coverage_score}/{COVERAGE_MAX}"
-    )
-
-    print(
-        f"Understanding & Quality: "
-        f"{understanding_score}/"
-        f"{UNDERSTANDING_MAX}"
-    )
-
-    print(
-        f"\nTOTAL: "
-        f"{total_score}/10"
-    )
-
-    print(
-        f"\nSaved to:\n{OUTPUT_FILE}"
-    )
+    print("\n===================================")
+    print("SCORING COMPLETE")
+    print(f"Scored {len(summary_list)} students. Saved summary to {all_summary_path}")
+    print("===================================")
 
 
 if __name__ == "__main__":
-    main()
+    main()
