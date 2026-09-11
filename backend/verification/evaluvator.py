@@ -27,17 +27,27 @@ OUTPUT_FILE = (
 
 
 # ============================================================
-# GEMINI SETUP
+# LLM SETUP (OpenRouter / Gemini)
 # ============================================================
 
-api_key = os.getenv("GEMINI_API_KEY")
+from dotenv import load_dotenv
+import requests
 
-if not api_key:
-    raise ValueError("GEMINI_API_KEY is not set")
+load_dotenv()
 
-client = genai.Client(api_key=api_key)
+openrouter_key = os.getenv("OPENROUTER_API_KEY")
+gemini_key = os.getenv("GEMINI_API_KEY")
 
-MODEL_NAME = "gemini-3.6-flash"
+if not openrouter_key and not gemini_key:
+    raise ValueError("Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is set in .env")
+
+if gemini_key and not openrouter_key:
+    client = genai.Client(api_key=gemini_key)
+else:
+    client = None
+
+MODEL_NAME = "google/gemini-2.5-flash"
+
 
 
 # ============================================================
@@ -155,14 +165,29 @@ Here are the claims and their lecture evidence:
 def evaluate_batch(batch):
     prompt = build_batch_prompt(batch)
 
-    interaction = client.interactions.create(
-        model=MODEL_NAME,
-        input=prompt
-    )
+    if openrouter_key and openrouter_key.startswith("sk-or-"):
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {openrouter_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": MODEL_NAME,
+            "max_tokens": 2000,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        res = requests.post(url, headers=headers, json=payload)
+        if res.status_code != 200:
+            raise ValueError(f"OpenRouter API error {res.status_code}: {res.text}")
+        response_text = res.json()["choices"][0]["message"]["content"].strip()
+    else:
+        interaction = client.interactions.create(
+            model="gemini-2.5-flash",
+            input=prompt
+        )
+        response_text = interaction.output_text.strip()
 
-    response_text = interaction.output_text.strip()
-
-    # Remove markdown fences if Gemini accidentally adds them
+    # Remove markdown fences if LLM accidentally adds them
     if response_text.startswith("```"):
         response_text = response_text.replace("```json", "")
         response_text = response_text.replace("```", "")
@@ -172,10 +197,10 @@ def evaluate_batch(batch):
         result = json.loads(response_text)
 
     except json.JSONDecodeError as error:
-        print("\nGemini returned invalid JSON:")
+        print("\nLLM returned invalid JSON:")
         print(response_text)
         raise ValueError(
-            "Gemini response could not be parsed as JSON."
+            "LLM response could not be parsed as JSON."
         ) from error
 
     return result["evaluations"]

@@ -128,8 +128,9 @@ def retrieve_evidence(
                     f"{evidence[0]['end_time']:.2f}"
                 )
 
+            safe_text = evidence[0]['text'].replace('\uf0a7', '-').encode('ascii', errors='backslashreplace').decode('ascii')
             print(
-                f"Text: {evidence[0]['text']}"
+                f"Text: {safe_text[:120]}..."
             )
 
     return results
@@ -142,7 +143,7 @@ def retrieve_evidence(
 def main():
 
     print("\n===================================")
-    print("CLAIM → EVIDENCE RETRIEVAL")
+    print("CLAIM -> EVIDENCE RETRIEVAL")
     print("===================================")
 
     print("\nLoading claims...")

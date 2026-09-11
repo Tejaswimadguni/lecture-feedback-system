@@ -33,20 +33,21 @@ OUTPUT_FILE = (
 )
 
 
-# --------------------------------------------------
-# Gemini setup
-# --------------------------------------------------
+from dotenv import load_dotenv
+import requests
 
-api_key = os.getenv("GEMINI_API_KEY")
+load_dotenv()
 
-if not api_key:
-    raise ValueError(
-        "GEMINI_API_KEY is not set."
-    )
+openrouter_key = os.getenv("OPENROUTER_API_KEY")
+gemini_key = os.getenv("GEMINI_API_KEY")
 
-client = genai.Client(
-    api_key=api_key
-)
+if not openrouter_key and not gemini_key:
+    raise ValueError("Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is set in .env")
+
+if gemini_key and not openrouter_key:
+    client = genai.Client(api_key=gemini_key)
+else:
+    client = None
 
 
 # --------------------------------------------------
@@ -76,7 +77,7 @@ def load_student_feedback(roll_number):
 
 
 # --------------------------------------------------
-# Extract claims using Gemini
+# Extract claims using Gemini or OpenRouter
 # --------------------------------------------------
 
 def extract_claims(feedback):
@@ -115,12 +116,27 @@ Student feedback:
 {feedback}
 """
 
-    interaction = client.interactions.create(
-        model="gemini-3.6-flash",
-        input=prompt
-    )
-
-    response_text = interaction.output_text.strip()
+    if openrouter_key and openrouter_key.startswith("sk-or-"):
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {openrouter_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "google/gemini-2.5-flash",
+            "max_tokens": 1500,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        res = requests.post(url, headers=headers, json=payload)
+        if res.status_code != 200:
+            raise ValueError(f"OpenRouter API error {res.status_code}: {res.text}")
+        response_text = res.json()["choices"][0]["message"]["content"].strip()
+    else:
+        interaction = client.interactions.create(
+            model="gemini-2.5-flash",
+            input=prompt
+        )
+        response_text = interaction.output_text.strip()
 
     try:
         result = json.loads(response_text)
@@ -141,7 +157,7 @@ Student feedback:
 
         else:
             raise ValueError(
-                "Gemini did not return valid JSON.\n\n"
+                "LLM did not return valid JSON.\n\n"
                 + response_text
             )
 
