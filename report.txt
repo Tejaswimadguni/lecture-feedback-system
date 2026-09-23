@@ -1,0 +1,581 @@
+================================================================================
+LECTURE FEEDBACK ANALYSIS SYSTEM - COMPREHENSIVE CODEBASE REPORT
+================================================================================
+
+1. EXECUTIVE SUMMARY & SYSTEM OVERVIEW
+--------------------------------------------------------------------------------
+The Lecture Feedback Analysis System is an AI-driven automated evaluation platform.
+Its core purpose is to analyze student post-lecture reflections and determine 
+whether the factual claims made by students are genuinely supported by the instructor's
+lecture materials (transcripts from audio/video recordings and lecture slides/PDFs).
+
+The system operates in four primary stages:
+  1. Ingestion & Extraction: Converts raw audio/video into timestamped transcripts 
+     via OpenAI Whisper, and extracts page-by-page text from lecture PDFs or PPTX files.
+  2. Processing & Chunking: Cleans speech disfluencies (e.g., filler words "uh", "um")
+     and PDF artifacts (headers, footers, page numbers), then segments text into 
+     standardized metadata-tagged chunks.
+  3. Vector Indexing & Retrieval: Computes 384-dimensional dense vector embeddings 
+     using SentenceTransformers (all-MiniLM-L6-v2) and stores them in a FAISS index 
+     for fast cosine similarity search.
+  4. Verification & Scoring: Uses Google Gemini LLM to extract atomic factual claims 
+     from student feedback, searches the FAISS index for top lecture evidence, 
+     verifies whether evidence supports the claim (SUPPORTED, PARTIALLY_SUPPORTED, 
+     NOT_SUPPORTED), and computes multi-factor scores for Factual Accuracy, Lecture 
+     Coverage, and Understanding Quality.
+
+
+================================================================================
+2. COMPLETE DIRECTORY TREE
+================================================================================
+lecture-feedback-system/
+│
+├── .env                                 # API keys (GEMINI_API_KEY / OPENROUTER_API_KEY)
+├── .gitignore                            # Version control exclusion rules
+├── README.md                             # Primary project documentation
+├── requirements.txt                      # Python dependencies
+├── run_audio.bat                         # Batch helper for audio transcription
+├── run_pipeline.py                       # CLI runner for cleaning, indexing & tests
+├── run_verification.py                   # CLI runner for student feedback verification
+│
+├── backend/
+│   ├── README.md                         # Backend module documentation
+│   ├── run_lecture_pipeline.py           # Master end-to-end lecture ingestion script
+│   │
+│   ├── ingestion/                        # Raw multimedia & document extractors
+│   │   ├── audio.py                      # Whisper audio/video speech-to-text
+│   │   ├── pdf.py                        # PDF text extraction (PyMuPDF / pypdf)
+│   │   └── ppt.py                        # PowerPoint slide extraction (python-pptx)
+│   │
+│   ├── processing/                       # Text cleaning & semantic chunking
+│   │   ├── __init__.py                   # Package exports
+│   │   ├── metadata.py                   # Standardized chunk schema & validation
+│   │   ├── pdf_cleaner.py                # Header/footer cleaner & equation preserver
+│   │   ├── pdf_chunker.py                # Page-aware slide/note chunker
+│   │   ├── pipeline.py                   # Multi-source processing orchestrator
+│   │   ├── transcript_cleaner.py         # Filler-word cleaner & whitespace normalizer
+│   │   └── transcript_chunker.py         # Timestamp-aware sliding-window chunker
+│   │
+│   ├── retrieval/                        # Object-oriented vector retrieval module
+│   │   ├── embedding.py                  # SentenceTransformers EmbeddingModel class
+│   │   ├── vector_store.py               # FAISS VectorStore class with metadata filtering
+│   │   └── search.py                     # SemanticSearch engine class
+│   │
+│   ├── retrival/                         # Functional vector retrieval with fallbacks
+│   │   ├── build_index.py                # Standalone script building FAISS vector index
+│   │   ├── embedding.py                  # Functional embedder with HuggingFace fallback
+│   │   ├── vector_store.py               # Functional FAISS store with pure-NumPy fallback
+│   │   ├── search.py                     # Functional search helper for verification
+│   │   └── test_embedding.py             # Sanity check for embedding generation
+│   │
+│   └── verification/                     # Student claim evaluation & scoring
+│       ├── claims.py                     # LLM atomic claim extraction from CSV reflections
+│       ├── retrieve_evidence.py          # Queries FAISS for top-K evidence chunks per claim
+│       ├── evaluvator.py                 # LLM evaluation of claims against evidence
+│       ├── scorer.py                     # Multi-factor grading (Accuracy, Coverage, Depth)
+│       ├── pipeline.py                   # Master verification workflow runner
+│       ├── prompts.py                    # Placeholder module for verification prompts
+│       └── test_gemini.py                # API connectivity check for Gemini / OpenRouter
+│
+├── data/
+│   ├── raw/                              # Original lecture source files & inputs
+│   │   ├── audio/                        # Audio files (.mp3)
+│   │   ├── video/                        # Video recordings (.mp4)
+│   │   ├── pdf/                          # Lecture slide PDFs
+│   │   └── students/                     # Student feedback CSV datasets
+│   ├── processed/                        # Intermediate cleaned & chunked outputs
+│   │   ├── transcripts/                  # Raw, clean, and chunked transcript JSONs
+│   │   ├── pdf_text/                     # Raw, clean, and chunked PDF slide JSONs
+│   │   └── metadata/                     # Consolidated dataset metadata summary
+│   ├── vector_store/                     # Persisted vector database & mappings
+│   │   ├── lecture_index.faiss           # FAISS IndexFlatIP binary file
+│   │   ├── embeddings.npy                # Dense embedding matrix (NumPy array)
+│   │   └── chunk_mapping.json            # Vector ID to chunk metadata mapping
+│   └── results/                          # Verification outputs, claims & score reports
+│
+├── tests/                                # Automated unit and integration test suite
+│   ├── run_tests.py                      # Central test runner executing all suites
+│   ├── test_metadata.py                  # Validates metadata schemas and constraints
+│   ├── test_pdf_processing.py            # Tests PDF cleaning, equations, and chunking
+│   ├── test_transcript_processing.py     # Tests filler word removal, chunks & timestamps
+│   └── test_retrieval.py                 # Tests embedding dimensions, cosine similarity & FAISS
+│
+└── frontend/                             # Frontend interface
+    └── README.md                         # Placeholder for future React dashboard
+
+
+================================================================================
+3. DETAILED BREAKDOWN OF EVERY FILE
+================================================================================
+
+--------------------------------------------------------------------------------
+A. ROOT CONFIGURATION & EXECUTION SCRIPTS
+--------------------------------------------------------------------------------
+
+1. README.md
+   - Path: lecture-feedback-system/README.md
+   - Purpose: Master project documentation.
+   - Contents:
+     * Full architecture description and pipeline diagrams.
+     * Environment setup instructions (Windows PowerShell, CMD, macOS/Linux).
+     * Dependency installation commands, FFmpeg configuration notes.
+     * Google Gemini API key configuration.
+     * Guide for running the master ingestion pipeline, individual modules, 
+       and automated tests.
+
+2. requirements.txt
+   - Path: lecture-feedback-system/requirements.txt
+   - Purpose: Declares all required third-party Python packages.
+   - Key Dependencies:
+     * openai-whisper, torch, imageio-ffmpeg (Audio transcription)
+     * PyMuPDF, pypdf, python-pptx (Document and slide parsing)
+     * numpy, pandas, tqdm (Data manipulation)
+     * sentence-transformers, faiss-cpu (Vector embeddings and semantic indexing)
+     * google-genai, python-dotenv (Google Gemini LLM integration)
+     * fastapi, uvicorn[standard] (Web API server)
+     * pytest (Testing framework)
+
+3. .env
+   - Path: lecture-feedback-system/.env
+   - Purpose: Secure local storage for environment variables and API keys.
+   - Variables:
+     * GEMINI_API_KEY: Google Gemini API key for claim extraction and evaluation.
+     * OPENROUTER_API_KEY: Optional alternative API key for OpenRouter endpoint.
+
+4. run_audio.bat
+   - Path: lecture-feedback-system/run_audio.bat
+   - Purpose: Windows batch script that invokes `backend/ingestion/audio.py`
+     using a dedicated Python 3.11 executable path.
+   - Allows users to pass audio path, lecture ID, and Whisper model size directly.
+
+5. run_pipeline.py
+   - Path: lecture-feedback-system/run_pipeline.py
+   - Purpose: Three-step master demonstration runner.
+   - Workflow:
+     * Step 1: Calls `backend.processing.pipeline.run_section2_pipeline()` to clean 
+       and chunk raw transcripts and PDFs.
+     * Step 2: Instantiates `backend.retrieval.search.SemanticSearch()` and builds 
+       the FAISS vector index from processed chunks.
+     * Step 3: Invokes `tests.run_tests.run_all_tests()` to verify system correctness.
+
+6. run_verification.py
+   - Path: lecture-feedback-system/run_verification.py
+   - Purpose: Master entry point for executing student reflection verification.
+   - Calls `backend.verification.pipeline.run_verification_pipeline()`.
+
+
+--------------------------------------------------------------------------------
+B. MASTER INGESTION PIPELINE
+--------------------------------------------------------------------------------
+
+7. backend/run_lecture_pipeline.py
+   - Path: lecture-feedback-system/backend/run_lecture_pipeline.py
+   - Purpose: Comprehensive CLI orchestrator that executes the full ingestion and
+     indexing pipeline for a single lecture from raw media to vector index.
+   - Arguments:
+     * --audio: Path to input audio/video file (.mp3, .mp4, .wav).
+     * --pdf: Path to lecture slides or notes PDF.
+     * --course-id: Course identifier (e.g. MIT_6_100L).
+     * --lecture-id: Lecture identifier (e.g. lec01).
+     * --whisper-model: Whisper model size (tiny, base, small, medium, large).
+     * --force-rebuild: Flag to force re-transcription and re-indexing.
+   - Pipeline Stages:
+     * Stage 1: Audio ingestion & Whisper transcription -> creates `_raw.json`.
+     * Stage 2: Transcript cleaning & sliding-window chunking -> creates `_clean.json`
+       and `_chunks.json`.
+     * Stage 3: PDF extraction, cleaning, and page-aware chunking.
+     * Stage 4: Metadata validation and dataset summary consolidation.
+     * Stage 5: Dense embedding generation (`all-MiniLM-L6-v2`), deduplication 
+       of existing lecture vectors, and atomic update of `lecture_index.faiss` 
+       and `chunk_mapping.json`.
+
+8. backend/README.md
+   - Path: lecture-feedback-system/backend/README.md
+   - Purpose: Architecture guide for backend developers, documenting module
+     responsibilities and CLI execution commands for ingestion, processing,
+     retrieval, and verification.
+
+
+--------------------------------------------------------------------------------
+C. INGESTION MODULES (backend/ingestion/)
+--------------------------------------------------------------------------------
+
+9. backend/ingestion/audio.py
+   - Path: lecture-feedback-system/backend/ingestion/audio.py
+   - Purpose: Audio and video speech-to-text ingestion using OpenAI Whisper.
+   - Key Functions:
+     * `_get_ffmpeg_exe()`: Detects FFmpeg from `imageio_ffmpeg` static binary 
+       or system PATH, ensuring compatibility on Windows without manual setup.
+     * `get_audio_duration(audio_path)`: Uses FFmpeg probe to extract duration in seconds.
+     * `transcribe_audio(...)`: Core transcription function. For long audio files 
+       (> 3 minutes), it splits audio into 180-second WAV chunks to prevent PyTorch 
+       CPU memory exhaustion. Outputs timestamped segments (`start`, `end`, `text`).
+     * `save_transcript_json(...)`: Transcribes and persists results into 
+       `data/processed/transcripts/<lecture_id>_transcript.json`.
+     * `find_all_raw_audio()` / `find_default_raw_audio()`: Auto-discovers media 
+       in `data/raw/audio/` and `data/raw/video/`.
+     * `main()`: CLI entrypoint with support for `--all` batch processing.
+
+10. backend/ingestion/pdf.py
+    - Path: lecture-feedback-system/backend/ingestion/pdf.py
+    - Purpose: Extracts structured text from PDF lecture notes or slide handouts.
+    - Key Functions:
+      * `extract_pdf_text(pdf_path, lecture_id)`: Extracts text page by page using 
+        PyMuPDF (`pymupdf`), with an automatic fallback to `pypdf` if native C-libraries 
+        are restricted. Returns a list of 1-indexed page objects with text.
+      * `save_pdf_text_json(...)`: Writes extracted text to 
+        `data/processed/pdf_text/<lecture_id>_notes.json`.
+      * `find_default_raw_pdf()`: Discovers first available raw PDF in `data/raw/pdf/`.
+      * `main()`: CLI entrypoint.
+
+11. backend/ingestion/ppt.py
+    - Path: lecture-feedback-system/backend/ingestion/ppt.py
+    - Purpose: Extracts text from PowerPoint presentation slides (.pptx).
+    - Key Functions:
+      * `extract_ppt_text(ppt_path, lecture_id)`: Uses `python-pptx` to iterate 
+        over shapes and paragraphs across slides, compiling slide-by-slide text.
+      * `save_ppt_text_json(...)`: Saves structured slide text to 
+        `data/processed/pdf_text/<lecture_id>_slides.json`.
+      * `find_default_raw_ppt()`: Auto-locates `.pptx` or `.ppt` files in `data/raw/ppt/`.
+      * `main()`: CLI entrypoint.
+
+
+--------------------------------------------------------------------------------
+D. PROCESSING & CHUNKING MODULES (backend/processing/)
+--------------------------------------------------------------------------------
+
+12. backend/processing/__init__.py
+    - Path: lecture-feedback-system/backend/processing/__init__.py
+    - Purpose: Package initialization; exports cleaner, chunker, and metadata functions.
+
+13. backend/processing/transcript_cleaner.py
+    - Path: lecture-feedback-system/backend/processing/transcript_cleaner.py
+    - Purpose: Normalizes raw speech transcript text.
+    - Key Functions:
+      * `clean_segment_text(text)`: Removes HTML/subtitle tags, normalizes Unicode 
+        spaces, strips speech filler words (`uh`, `um`, `erm`, `hmm`, `ah`, `er`) 
+        via regular expressions, fixes broken commas, and collapses multiple spaces.
+      * `clean_transcript(segments)`: Applies cleaning across all transcript segments 
+        while strictly preserving original `start` and `end` timestamps.
+
+14. backend/processing/transcript_chunker.py
+    - Path: lecture-feedback-system/backend/processing/transcript_chunker.py
+    - Purpose: Chunks cleaned transcript segments for semantic embedding.
+    - Key Functions:
+      * `count_words(text)`: Counts words in text.
+      * `chunk_transcript(segments, ...)`: Sliding-window chunker. Aggregates segments 
+        until target word count (~350 words) is reached, applies overlap (~50 words), 
+        assigns standardized chunk IDs (`MIT_6_100L_lec01_T001`), and records the 
+        overall start and end timestamps from the first and last segments in the window.
+
+15. backend/processing/pdf_cleaner.py
+    - Path: lecture-feedback-system/backend/processing/pdf_cleaner.py
+    - Purpose: Cleans extracted PDF slide and document text.
+    - Key Functions:
+      * `clean_pdf_page_text(text, custom_headers)`: Reconnects broken hyphenated 
+        words across line breaks (e.g., `com-\nputation` -> `computation`), strips 
+        common course slide headers (e.g., `6.100L Lecture 1`), removes standalone 
+        page numbers, collapses excessive whitespace, and preserves mathematical 
+        equations, formulas, and technical definitions.
+      * `clean_pdf_pages(pages, custom_headers)`: Processes page list and filters 
+        out empty pages.
+
+16. backend/processing/pdf_chunker.py
+    - Path: lecture-feedback-system/backend/processing/pdf_chunker.py
+    - Purpose: Creates page-aware chunks from cleaned PDF pages.
+    - Key Functions:
+      * `chunk_pdf(pages, ...)`: If a slide/page has <= 350 words, it generates 
+        a single chunk (`..._P01_C01`). If a page exceeds 350 words, it splits 
+        along double-newline paragraph boundaries into sub-chunks (`_P01_C01`, 
+        `_P01_C02`), strictly preserving the 1-indexed page number for citation.
+
+17. backend/processing/metadata.py
+    - Path: lecture-feedback-system/backend/processing/metadata.py
+    - Purpose: Defines and enforces the unified chunk metadata schema.
+    - Key Functions:
+      * `create_chunk_metadata(...)`: Constructs a dictionary containing 11 required 
+        fields: `chunk_id`, `course_id`, `course_name`, `lecture_id`, `lecture_title`, 
+        `source_type` ('transcript' or 'pdf'), `source_file`, `text`, `start_time`, 
+        `end_time`, `page`.
+      * `validate_chunk(chunk)`: Validates that all required fields exist, ensures 
+        transcripts have valid timestamps, ensures PDFs have valid page numbers, 
+        and verifies non-empty text.
+      * `build_dataset_metadata(all_chunks, output_path)`: Compiles summary statistics 
+        (total chunks, transcript count, PDF count, list of courses, list of lectures) 
+        and writes to `data/processed/metadata/dataset_metadata.json`.
+
+18. backend/processing/pipeline.py
+    - Path: lecture-feedback-system/backend/processing/pipeline.py
+    - Purpose: End-to-end data processing pipeline for Section 2.
+    - Key Functions:
+      * `process_transcript_file(...)`: Ingests raw transcript JSON, cleans it, chunks 
+        it, and writes `lecture_01_raw.json`, `lecture_01_clean.json`, and 
+        `lecture_01_chunks.json`.
+      * `process_pdf_file(...)`: Ingests raw PDF JSON, cleans pages, chunks pages, 
+        and writes `lecture_01_raw.json`, `lecture_01_clean.json`, and 
+        `lecture_01_chunks.json`.
+      * `run_section2_pipeline()`: Orchestrates processing of available transcripts 
+        and PDFs, validates all chunks, and produces the dataset metadata summary.
+
+
+--------------------------------------------------------------------------------
+E. VECTOR RETRIEVAL MODULES (backend/retrieval/ & backend/retrival/)
+--------------------------------------------------------------------------------
+
+19. backend/retrieval/embedding.py
+    - Path: lecture-feedback-system/backend/retrieval/embedding.py
+    - Purpose: Object-oriented embedding model interface.
+    - Key Classes:
+      * `EmbeddingModel`: Wraps `sentence-transformers` using model `all-MiniLM-L6-v2` 
+        (384 dimensions). Lazy-loads the model, implements `.encode()` with L2 vector 
+        normalization (enabling inner product calculation as cosine similarity), 
+        and provides a `.similarity(text1, text2)` helper.
+
+20. backend/retrieval/vector_store.py
+    - Path: lecture-feedback-system/backend/retrieval/vector_store.py
+    - Purpose: Object-oriented FAISS vector index and metadata store.
+    - Key Classes:
+      * `VectorStore`: Wraps `faiss.IndexFlatIP`. Maps sequential 0-indexed vector 
+        positions to chunk metadata dicts.
+      * `.build_index(chunks, embedding_model)`: Encodes texts and populates the index.
+      * `.save_index(...)` / `.load_index(...)`: Serializes and loads `.faiss` index 
+        and `chunk_metadata.json`.
+      * `.search(query_vector, top_k, course_id, lecture_id, source_type)`: Over-fetches 
+        candidates to guarantee top-K results after applying metadata filters.
+
+21. backend/retrieval/search.py
+    - Path: lecture-feedback-system/backend/retrieval/search.py
+    - Purpose: Object-oriented semantic search engine combining embeddings and vector store.
+    - Key Classes:
+      * `SemanticSearch`: Combines `EmbeddingModel` and `VectorStore`.
+      * `.index_processed_dataset(...)`: Loads processed transcript and PDF chunk JSONs, 
+        generates embeddings, builds the index, and saves to disk.
+      * `.search(query, top_k, ...)`: Encodes query string and returns top matching chunks.
+      * `main()`: Runs sample semantic search queries and prints formatted results.
+
+22. backend/retrival/embedding.py
+    - Path: lecture-feedback-system/backend/retrival/embedding.py
+    - Purpose: Functional embedding module with a pure PyTorch fallback.
+    - Key Functions:
+      * `generate_embeddings(texts)` / `generate_embedding(text)`: Tries `SentenceTransformer`.
+        If C-libraries or DLLs fail on Windows, seamlessly falls back to direct 
+        HuggingFace `AutoTokenizer` and `BertModel` with mean-pooling and L2 normalization.
+
+23. backend/retrival/vector_store.py
+    - Path: lecture-feedback-system/backend/retrival/vector_store.py
+    - Purpose: Functional vector store with a pure NumPy fallback.
+    - Key Classes & Functions:
+      * `NumpyIndexFlatIP`: Pure NumPy implementation of `faiss.IndexFlatIP` with `.add()` 
+        and `.search()` matrix multiplication (`q @ embeddings.T`), used as an automatic 
+        fallback if FAISS C-extensions fail on Windows.
+      * `create_faiss_index(embeddings)`: Creates native FAISS or NumPy index.
+      * `save_faiss_index(index, file_path)`: Writes `.faiss` index or NumPy array.
+      * `load_faiss_index(file_path)`: Loads saved index from disk.
+
+24. backend/retrival/build_index.py
+    - Path: lecture-feedback-system/backend/retrival/build_index.py
+    - Purpose: Standalone CLI script to build the FAISS vector database.
+    - Workflow:
+      * Loads `lecture_01_chunks.json` from transcripts and PDF directories.
+      * Generates 384-dimensional dense embeddings for all text chunks.
+      * Saves `embeddings.npy`, builds `chunk_mapping.json`, and saves `lecture_index.faiss`.
+
+25. backend/retrival/search.py
+    - Path: lecture-feedback-system/backend/retrival/search.py
+    - Purpose: Functional semantic search utility used by the verification pipeline.
+    - Key Functions:
+      * `search(query, top_k=5)`: Loads `lecture_index.faiss` and `chunk_mapping.json`, 
+        encodes the query, queries the index, and returns matching chunks with scores.
+
+26. backend/retrival/test_embedding.py
+    - Path: lecture-feedback-system/backend/retrival/test_embedding.py
+    - Purpose: Quick sanity test to verify embedding dimensions and model loading.
+
+
+--------------------------------------------------------------------------------
+F. VERIFICATION & EVALUATION MODULES (backend/verification/)
+--------------------------------------------------------------------------------
+
+27. backend/verification/claims.py
+    - Path: lecture-feedback-system/backend/verification/claims.py
+    - Purpose: Extracts atomic factual claims from student reflection text.
+    - Key Functions:
+      * `load_student_feedback(roll_number)`: Reads student feedback from CSV.
+      * `extract_claims(feedback)`: Sends feedback to Gemini 2.5 Flash (via OpenRouter 
+        or Google GenAI SDK) to extract 8 to 12 concise factual claims in structured JSON.
+      * `repair_json(text)`: Heuristic repair function that strips markdown formatting 
+        and fixes truncated JSON arrays.
+      * `fallback_extract_claims(feedback)`: Rule-based sentence splitter used if 
+        API credits are exhausted or network is offline.
+      * `process_student(row)`: Caches extracted claims to `student_XX_claims.json`.
+      * `main()`: Processes all students in `lecture_feedback_25_students_v2.csv`.
+
+28. backend/verification/retrieve_evidence.py
+    - Path: lecture-feedback-system/backend/verification/retrieve_evidence.py
+    - Purpose: Links extracted claims to lecture source materials.
+    - Key Functions:
+      * `retrieve_evidence(claims, top_k=5)`: Takes each atomic claim, executes 
+        semantic search against `lecture_index.faiss`, and retrieves the top 5 
+        evidence chunks with similarity scores, timestamps, and page numbers.
+      * `main()`: Processes all `student_*_claims.json` files and outputs 
+        `student_*_evidence.json`.
+
+29. backend/verification/evaluvator.py
+    - Path: lecture-feedback-system/backend/verification/evaluvator.py
+    - Purpose: Uses Gemini LLM to evaluate claims against retrieved lecture evidence.
+    - Key Functions:
+      * `build_batch_prompt(batch)`: Prepares evaluation prompts with strict rules: 
+        evaluate claim using ONLY provided evidence, classifying each as `SUPPORTED`, 
+        `PARTIALLY_SUPPORTED`, or `NOT_SUPPORTED` with concise explanations.
+      * `evaluate_batch(batch)`: Dispatches batches of claims to Gemini 2.5 Flash, 
+        with automatic fallback to similarity-score thresholds (`fallback_batch_eval`).
+      * `evaluate_student_file(file_path)`: Evaluates a student's evidence file and 
+        saves results to `student_XX_evaluated.json`.
+      * `main()`: Batch-evaluates all students.
+
+30. backend/verification/scorer.py
+    - Path: lecture-feedback-system/backend/verification/scorer.py
+    - Purpose: Multi-factor grading engine for student learning reflections.
+    - Scoring Dimensions (Total Max: 10 points):
+      * 1. Factual Accuracy (Max 5.0): Evaluates proportion of claims supported by lecture 
+           material (`calculate_accuracy()`). Supported = 1.0, Partially Supported = 0.5, 
+           Not Supported = 0.0.
+      * 2. Lecture Coverage (Max 3.0): Evaluates breath of lecture topics covered 
+           (`calculate_coverage()`). Checks 10 core lecture concepts: course expectations, 
+           computational thinking, declarative vs. imperative, square root algorithm, 
+           computer architecture, Turing machines, syntax/semantics, Python types, 
+           expressions, and variables/rebinding.
+      * 3. Understanding Quality (Max 2.0): Combines accuracy ratio (60% weight) with 
+           depth of reflection (40% weight based on claim volume, `calculate_understanding()`).
+    - Outputs:
+      * `student_XX_score.json` for each individual student.
+      * `all_students_summary.json` containing class-wide performance metrics.
+
+31. backend/verification/pipeline.py
+    - Path: lecture-feedback-system/backend/verification/pipeline.py
+    - Purpose: Master verification orchestrator.
+    - Workflow:
+      * Step 1: Extracts factual claims (`claims.main()`).
+      * Pre-check: Ensures FAISS index exists; builds index if missing.
+      * Step 2: Retrieves lecture evidence (`retrieve_evidence.main()`).
+      * Step 3: Evaluates claims via LLM (`evaluvator.main()`).
+      * Step 4: Computes multi-factor scores (`scorer.main()`).
+
+32. backend/verification/test_gemini.py
+    - Path: lecture-feedback-system/backend/verification/test_gemini.py
+    - Purpose: Quick diagnostic tool to test API connectivity to Gemini / OpenRouter.
+
+33. backend/verification/prompts.py
+    - Path: lecture-feedback-system/backend/verification/prompts.py
+    - Purpose: Placeholder module reserved for centralized LLM prompt templates.
+
+
+--------------------------------------------------------------------------------
+G. TEST SUITE (tests/)
+--------------------------------------------------------------------------------
+
+34. tests/run_tests.py
+    - Path: lecture-feedback-system/tests/run_tests.py
+    - Purpose: Master test runner. Executes 11 comprehensive automated tests 
+      without requiring external test runner dependencies.
+
+35. tests/test_transcript_processing.py
+    - Path: lecture-feedback-system/tests/test_transcript_processing.py
+    - Tests:
+      * `test_clean_transcript_removes_filler_words_and_preserves_timestamps`: 
+        Verifies filler word removal (`uh`, `um`) while preserving timestamps.
+      * `test_chunk_transcript_timestamps_and_metadata`: Verifies sliding-window 
+        chunk creation, word count targets, and start/end timestamp ranges.
+
+36. tests/test_pdf_processing.py
+    - Path: lecture-feedback-system/tests/test_pdf_processing.py
+    - Tests:
+      * `test_clean_pdf_removes_headers_footers_preserves_equations`: Verifies 
+        header/footer removal and mathematical equation preservation (`y*y = x`).
+      * `test_chunk_pdf_page_aware_and_metadata`: Verifies page-aware chunk naming 
+        and metadata schema adherence.
+
+37. tests/test_metadata.py
+    - Path: lecture-feedback-system/tests/test_metadata.py
+    - Tests:
+      * `test_transcript_chunk_metadata_schema`: Validates transcript chunk fields.
+      * `test_pdf_chunk_metadata_schema`: Validates PDF chunk fields.
+      * `test_invalid_chunk_metadata_raises`: Ensures missing required fields 
+        or mismatched source types raise `ValueError`.
+      * `test_build_dataset_metadata`: Tests summary generation across multiple chunks.
+
+38. tests/test_retrieval.py
+    - Path: lecture-feedback-system/tests/test_retrieval.py
+    - Tests:
+      * `test_embedding_model_shape_and_similarity`: Verifies (N, 384) vector shapes 
+        and checks that related texts yield higher cosine similarity than unrelated texts.
+      * `test_vector_store_build_search_and_filter`: Verifies FAISS indexing and 
+        filtering by `source_type` ('transcript' vs 'pdf').
+      * `test_semantic_search_end_to_end`: Tests complete semantic search flow.
+
+
+--------------------------------------------------------------------------------
+H. DATA DIRECTORY ARTIFACTS (data/)
+--------------------------------------------------------------------------------
+
+39. data/raw/
+    - `audio/`: Contains lecture audio recordings (e.g. `6100l-lecture-1-version-2_360p_16_9.mp3`).
+    - `video/`: Contains lecture video recordings (e.g. `6100l-lecture-1-version-2_360p_16_9.mp4`).
+    - `pdf/`: Contains lecture slide PDFs (e.g. `mit6_100l_f22_lec01.pdf`).
+    - `students/`: Contains student reflections CSV files:
+      * `lecture_feedback_25_students.csv`: Initial 25-student feedback dataset.
+      * `lecture_feedback_25_students_v2.csv`: Cleaned feedback dataset used in verification.
+
+40. data/processed/
+    - `transcripts/`: Stores `lecture_01_raw.json` (Whisper segments), 
+      `lecture_01_clean.json` (cleaned segments), and `lecture_01_chunks.json` (350-word chunks).
+    - `pdf_text/`: Stores `lecture_01_raw.json` (extracted pages), 
+      `lecture_01_clean.json` (cleaned pages), and `lecture_01_chunks.json` (page-aware chunks).
+    - `metadata/`: Stores `dataset_metadata.json` (global chunk counts and course indices).
+
+41. data/vector_store/
+    - `lecture_index.faiss`: Binary FAISS IndexFlatIP file with dense vector embeddings.
+    - `embeddings.npy`: Serialized NumPy array of shape (N, 384) containing all chunk vectors.
+    - `chunk_mapping.json`: JSON array mapping vector indices to chunk metadata.
+
+42. data/results/
+    - Destination directory for verification artifacts:
+      * `student_XX_claims.json`: Extracted claims per student.
+      * `student_XX_evidence.json`: Top-K matching lecture chunks per claim.
+      * `student_XX_evaluated.json`: Verification classifications and explanations.
+      * `student_XX_score.json`: Individual score reports.
+      * `all_students_summary.json`: Consolidated class score summary.
+
+
+--------------------------------------------------------------------------------
+I. FRONTEND DIRECTORY (frontend/)
+--------------------------------------------------------------------------------
+
+43. frontend/README.md
+    - Path: lecture-feedback-system/frontend/README.md
+    - Purpose: Placeholder documentation for the React-based feedback analytics dashboard.
+
+
+================================================================================
+4. SUMMARY OF COMMANDS TO RUN THE SYSTEM
+================================================================================
+
+1. Run the Complete Ingestion Pipeline (Audio + PDF -> Chunks -> FAISS):
+   python backend/run_lecture_pipeline.py \
+       --audio data/raw/audio/6100l-lecture-1-version-2_360p_16_9.mp3 \
+       --pdf data/raw/pdf/mit6_100l_f22_lec01.pdf \
+       --course-id MIT_6_100L \
+       --lecture-id lec01
+
+2. Run Processing & Vector Indexing Demo + All Tests:
+   python run_pipeline.py
+
+3. Run the Automated Test Suite:
+   python tests/run_tests.py
+
+4. Run the Full Student Feedback Verification Pipeline:
+   python run_verification.py
+
+================================================================================
+END OF REPORT
+================================================================================
