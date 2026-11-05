@@ -1,126 +1,76 @@
+import argparse
 import json
-import os
+import sys
 from pathlib import Path
-
-try:
-    from google import genai
-except ImportError:
-    genai = None
-
-
-# ============================================================
-# PROJECT PATHS
-# ============================================================
+from typing import Any, Dict, List, Optional, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-EVIDENCE_FILE = (
-    PROJECT_ROOT
-    / "data"
-    / "results"
-    / "student_01_evidence.json"
-)
+from backend.common.paths import validate_identifier
+from backend.verification.llm_client import call_llm_json
 
-OUTPUT_FILE = (
-    PROJECT_ROOT
-    / "data"
-    / "results"
-    / "student_01_evaluated.json"
-)
-
-
-# ============================================================
-# LLM SETUP (OpenRouter / Gemini)
-# ============================================================
-
-from dotenv import load_dotenv
-import requests
-
-load_dotenv()
-
-openrouter_key = os.getenv("OPENROUTER_API_KEY")
-gemini_key = os.getenv("GEMINI_API_KEY")
-
-if not openrouter_key and not gemini_key:
-    raise ValueError("Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is set in .env")
-
-if gemini_key and not openrouter_key:
-    client = genai.Client(api_key=gemini_key)
-else:
-    client = None
-
-MODEL_NAME = "google/gemini-2.5-flash"
-
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-# Number of claims evaluated in one Gemini request
-BATCH_SIZE = 2
-
-# Number of evidence chunks given to Gemini for each claim
+BATCH_SIZE = 4
 TOP_K_EVIDENCE = 3
+VALID_STATUSES = {"SUPPORTED", "PARTIALLY_SUPPORTED", "NOT_SUPPORTED"}
 
 
-def fallback_batch_eval(batch):
-    evals = []
+def fallback_batch_eval(batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Deterministic evidence-similarity evaluator used when LLM API is unavailable.
+    Evaluates strictly against the retrieved lecture evidence scores.
+    """
+    evals: List[Dict[str, Any]] = []
     for claim in batch:
         c_id = claim.get("claim_id")
         ev = claim.get("evidence", [])
-        top_score = ev[0].get("score", 0.0) if ev else 0.0
-        if top_score >= 0.60:
-            st = "SUPPORTED"
-            exp = f"Evidence strongly matches claim (vector similarity {top_score:.2f})."
-        elif top_score >= 0.45:
-            st = "PARTIALLY_SUPPORTED"
-            exp = f"Evidence partially matches claim (vector similarity {top_score:.2f})."
+        top_score = float(ev[0].get("score", 0.0)) if ev else 0.0
+        top_chunk = ev[0].get("chunk_id", "none") if ev else "none"
+
+        if top_score >= 0.55:
+            status = "SUPPORTED"
+            exp = (
+                f"Retrieved lecture chunk '{top_chunk}' strongly supports this claim "
+                f"(cosine similarity {top_score:.2f})."
+            )
+        elif top_score >= 0.40:
+            status = "PARTIALLY_SUPPORTED"
+            exp = (
+                f"Retrieved lecture chunk '{top_chunk}' partially aligns with this claim "
+                f"(cosine similarity {top_score:.2f})."
+            )
         else:
-            st = "NOT_SUPPORTED"
-            exp = f"Evidence does not sufficiently support claim (similarity {top_score:.2f})."
-        evals.append({"claim_id": c_id, "status": st, "explanation": exp})
+            status = "NOT_SUPPORTED"
+            exp = (
+                f"Retrieved lecture evidence does not sufficiently support this claim "
+                f"(highest similarity {top_score:.2f})."
+            )
+
+        evals.append({
+            "claim_id": c_id,
+            "status": status,
+            "explanation": exp,
+        })
     return evals
 
 
-def build_batch_prompt(batch):
-    prompt = """
-You are evaluating factual claims made by a student about a lecture.
+def build_batch_prompt(batch: List[Dict[str, Any]]) -> str:
+    prompt = """You are evaluating factual claims made by a student about a specific lecture.
 
-For each claim, compare the student's claim against the retrieved
-lecture evidence.
-
-Use ONLY the provided evidence.
+For each claim, compare the student's claim strictly against the retrieved lecture evidence below.
+Use ONLY the provided lecture evidence. Do NOT use outside knowledge.
 
 Classify each claim as exactly one of:
+- SUPPORTED: The lecture evidence clearly supports the student's claim.
+- PARTIALLY_SUPPORTED: The evidence supports only part of the claim, or mixes supported and unsupported details.
+- NOT_SUPPORTED: The provided lecture evidence does not support the claim or contradicts it.
 
-SUPPORTED
-PARTIALLY_SUPPORTED
-NOT_SUPPORTED
+Return ONLY valid JSON with this structure:
+{"evaluations": [{"claim_id": "C01", "status": "SUPPORTED", "explanation": "Concise reason citing evidence."}]}
 
-Definitions:
-
-SUPPORTED:
-The lecture evidence clearly supports the student's claim.
-
-PARTIALLY_SUPPORTED:
-The evidence supports only part of the claim, or the student's
-claim contains some supported information and some unsupported
-information.
-
-NOT_SUPPORTED:
-The provided evidence does not support the claim.
-
-Important:
-- Do NOT use outside knowledge.
-- Base the decision on the evidence provided.
-- Keep explanations concise.
-- Return ONLY valid JSON: {"evaluations": [{"claim_id": "C01", "status": "SUPPORTED", "explanation": "..."}]}
-
-Here are the claims and their lecture evidence:
-
+Claims and retrieved lecture evidence:
 """
-
     for claim in batch:
         prompt += "\n========================================\n"
         prompt += f"CLAIM ID: {claim['claim_id']}\n"
@@ -128,207 +78,165 @@ Here are the claims and their lecture evidence:
         prompt += "\nLECTURE EVIDENCE:\n"
 
         evidence = claim.get("evidence", [])
-
-        for i, item in enumerate(
-            evidence[:TOP_K_EVIDENCE],
-            start=1
-        ):
-            prompt += f"\nEvidence {i}:\n"
-            prompt += f"Source: {item.get('source_type')}\n"
-
+        for i, item in enumerate(evidence[:TOP_K_EVIDENCE], start=1):
+            prompt += f"\nEvidence {i} (Chunk {item.get('chunk_id')}):\n"
+            prompt += f"Source: {item.get('source_type')} ({item.get('source_file')})\n"
             if item.get("page") is not None:
                 prompt += f"Page: {item.get('page')}\n"
-
             if item.get("start_time") is not None:
-                prompt += (
-                    f"Time: {item.get('start_time')} - "
-                    f"{item.get('end_time')}\n"
-                )
-
+                prompt += f"Time: {item.get('start_time')} - {item.get('end_time')}\n"
             prompt += f"Similarity: {item.get('score')}\n"
             prompt += f"Text: {item.get('text')}\n"
 
     return prompt
 
 
-API_CREDITS_EXHAUSTED = False
-
-def evaluate_batch(batch):
-    global API_CREDITS_EXHAUSTED
-
-    if API_CREDITS_EXHAUSTED:
-        return fallback_batch_eval(batch)
-
+def evaluate_batch(batch: List[Dict[str, Any]], strict_llm: bool = False) -> List[Dict[str, Any]]:
     prompt = build_batch_prompt(batch)
-
-    if openrouter_key and openrouter_key.startswith("sk-or-"):
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {openrouter_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": MODEL_NAME,
-            "max_tokens": 120,
-            "messages": [{"role": "user", "content": prompt}]
-        }
-        max_retries = 2
-        res = None
-        for attempt in range(max_retries):
-            res = requests.post(url, headers=headers, json=payload)
-            if res.status_code == 200:
-                break
-            if res.status_code == 402:
-                print("  [Notice] OpenRouter free credits exhausted. Switching instantly to similarity scoring fallback.")
-                API_CREDITS_EXHAUSTED = True
-                return fallback_batch_eval(batch)
-            if res.status_code in (429, 503) and attempt < max_retries - 1:
-                import time
-                wait_sec = int(res.headers.get("Retry-After", 2 * (attempt + 1)))
-                print(f"  [Rate limit {res.status_code}] Pausing for {wait_sec}s before retry...", flush=True)
-                time.sleep(wait_sec)
-        
-        if res is None or res.status_code != 200:
-            return fallback_batch_eval(batch)
-
-        response_text = res.json()["choices"][0]["message"]["content"].strip()
-        import time
-        time.sleep(0.5)
-    else:
-        interaction = client.interactions.create(
-            model="gemini-2.5-flash",
-            input=prompt
-        )
-        response_text = interaction.output_text.strip()
-
-    try:
-        result = repair_json(response_text)
-    except Exception:
+    parsed = call_llm_json(prompt=prompt, max_tokens=700, strict_llm=strict_llm)
+    if parsed is None:
         return fallback_batch_eval(batch)
 
-    return result.get("evaluations", [])
+    raw_evals = parsed.get("evaluations")
+    if not isinstance(raw_evals, list):
+        if strict_llm:
+            raise ValueError("LLM evaluation response missing 'evaluations' list.")
+        return fallback_batch_eval(batch)
+
+    normalized: List[Dict[str, Any]] = []
+    for item in raw_evals:
+        if not isinstance(item, dict) or not item.get("claim_id"):
+            continue
+        raw_status = str(item.get("status", "NOT_SUPPORTED")).strip().upper()
+        status = raw_status if raw_status in VALID_STATUSES else "NOT_SUPPORTED"
+        explanation = str(item.get("explanation", "")).strip() or "Evaluated against retrieved lecture evidence."
+        normalized.append({
+            "claim_id": str(item["claim_id"]),
+            "status": status,
+            "explanation": explanation,
+        })
+
+    if not normalized:
+        return fallback_batch_eval(batch)
+    return normalized
 
 
-# ============================================================
-# EVALUATE SINGLE STUDENT FILE
-# ============================================================
+def evaluate_student_evidence_to_file(
+    evidence_path: Union[str, Path],
+    output_path: Union[str, Path],
+    course_id: str,
+    lecture_id: str,
+    strict_llm: bool = False,
+) -> Dict[str, Any]:
+    """
+    Evaluates a student's claims against retrieved lecture evidence from evidence_path
+    and writes explicit output_path (evaluated.json).
+    """
+    valid_course_id = validate_identifier(course_id, "course_id")
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
 
-def evaluate_student_file(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
+    src = Path(evidence_path).resolve()
+    if not src.exists():
+        raise FileNotFoundError(f"Evidence file not found: {src}")
+
+    with open(src, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    roll_number = data.get("roll_number", 1)
-    out_file = file_path.parent / f"student_{roll_number:02d}_evaluated.json"
-    if out_file.exists():
-        try:
-            with open(out_file, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-                if existing.get("claims"):
-                    print(f"  --> Using cached evaluations for Roll No. {roll_number} ({len(existing['claims'])} claims).")
-                    return existing
-        except Exception:
-            pass
+    if data.get("course_id") != valid_course_id or data.get("lecture_id") != valid_lecture_id:
+        raise ValueError(
+            f"Evidence file {src} belongs to {data.get('course_id')}/{data.get('lecture_id')}, "
+            f"expected {valid_course_id}/{valid_lecture_id}."
+        )
+
+    student_id = data["student_id"]
     claims = data.get("claims", [])
 
-    prepared_claims = []
+    prepared_claims: List[Dict[str, Any]] = []
     for claim in claims:
+        ev_list = claim.get("evidence", [])
+        for ev in ev_list:
+            if ev.get("course_id") != valid_course_id or ev.get("lecture_id") != valid_lecture_id:
+                raise ValueError(
+                    f"Cross-lecture evidence chunk '{ev.get('chunk_id')}' detected during evaluation."
+                )
         prepared_claims.append({
             "claim_id": claim["claim_id"],
             "claim_text": claim["claim"],
-            "evidence": claim.get("evidence", [])
+            "evidence": ev_list,
         })
 
     batches = [
-        prepared_claims[i:i + BATCH_SIZE]
+        prepared_claims[i : i + BATCH_SIZE]
         for i in range(0, len(prepared_claims), BATCH_SIZE)
     ]
 
-    all_evaluations = []
+    all_evaluations: List[Dict[str, Any]] = []
     for batch in batches:
-        evaluations = evaluate_batch(batch)
-        all_evaluations.extend(evaluations)
+        all_evaluations.extend(evaluate_batch(batch, strict_llm=strict_llm))
 
     evaluation_map = {item["claim_id"]: item for item in all_evaluations}
+    fallback_map = {item["claim_id"]: item for item in fallback_batch_eval(prepared_claims)}
 
-    final_claims = []
+    final_claims: List[Dict[str, Any]] = []
     for claim in claims:
-        claim_id = claim["claim_id"]
-        evaluation = evaluation_map.get(
-            claim_id,
+        cid = claim["claim_id"]
+        eval_item = evaluation_map.get(cid) or fallback_map.get(
+            cid,
             {
-                "claim_id": claim_id,
+                "claim_id": cid,
                 "status": "NOT_SUPPORTED",
-                "explanation": "No evaluation returned."
-            }
+                "explanation": "No supporting evidence evaluation available.",
+            },
         )
         final_claims.append({
-            "claim_id": claim_id,
+            "claim_id": cid,
             "claim": claim["claim"],
-            "status": evaluation["status"],
-            "explanation": evaluation["explanation"],
-            "evidence": claim.get("evidence", [])[:TOP_K_EVIDENCE]
+            "status": eval_item["status"],
+            "explanation": eval_item["explanation"],
+            "evidence": claim.get("evidence", [])[:TOP_K_EVIDENCE],
         })
 
-    output = {
-        "roll_number": roll_number,
+    payload = {
+        "student_id": student_id,
+        "sanitized_student_id": data.get("sanitized_student_id", student_id),
+        "course_id": valid_course_id,
+        "lecture_id": valid_lecture_id,
         "total_claims": len(final_claims),
-        "claims": final_claims
+        "claims": final_claims,
     }
 
-    out_file = file_path.parent / f"student_{roll_number:02d}_evaluated.json"
-    with open(out_file, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
+    dest = Path(output_path).resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    if roll_number == 1:
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            json.dump(output, f, indent=2, ensure_ascii=False)
-
-    return output
+    return payload
 
 
-# ============================================================
-# MAIN
-# ============================================================
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Evaluate student claims strictly against retrieved lecture evidence."
+    )
+    parser.add_argument("--course-id", required=True, help="Explicit course identifier.")
+    parser.add_argument("--lecture-id", required=True, help="Explicit lecture identifier.")
+    parser.add_argument("--evidence-file", required=True, help="Explicit path to student evidence.json.")
+    parser.add_argument("--output-file", required=True, help="Explicit path to output evaluated.json.")
+    parser.add_argument("--strict-llm", action="store_true", help="Fail immediately on LLM API errors.")
 
-def main(target_roll_number=None):
-    print("\n===================================")
-    print("CLAIM EVALUATION")
-    print("===================================")
-
-    results_dir = OUTPUT_FILE.parent
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    if target_roll_number is not None:
-        evidence_files = [results_dir / f"student_{int(target_roll_number):02d}_evidence.json"]
-    else:
-        evidence_files = sorted(list(results_dir.glob("student_*_evidence.json")))
-
-    if not evidence_files and EVIDENCE_FILE.exists():
-        evidence_files = [EVIDENCE_FILE]
-
-    print(f"\nFound {len(evidence_files)} evidence files to evaluate...")
-
-    for idx, e_file in enumerate(evidence_files, start=1):
-        if not e_file.exists():
-            continue
-
-        with open(e_file, "r", encoding="utf-8") as f:
-            d = json.load(f)
-
-        roll_num = d.get("roll_number", idx)
-        print(f"\n[{idx}/{len(evidence_files)}] Evaluating Roll No. {roll_num} ({len(d.get('claims', []))} claims)...")
-        res = evaluate_student_file(e_file)
-
-        supported = sum(1 for c in res["claims"] if c["status"] == "SUPPORTED")
-        partially = sum(1 for c in res["claims"] if c["status"] == "PARTIALLY_SUPPORTED")
-        unsupported = sum(1 for c in res["claims"] if c["status"] == "NOT_SUPPORTED")
-        print(f"  --> Supported: {supported} | Partial: {partially} | Not Supported: {unsupported}")
-
-    print("\n===================================")
-    print("EVALUATION COMPLETE")
-    print(f"Evaluated {len(evidence_files)} students. Saved to {results_dir}")
-    print("===================================")
+    args = parser.parse_args(argv)
+    try:
+        evaluate_student_evidence_to_file(
+            evidence_path=args.evidence_file,
+            output_path=args.output_file,
+            course_id=args.course_id,
+            lecture_id=args.lecture_id,
+            strict_llm=args.strict_llm,
+        )
+        print(f"Saved claim evaluation to {args.output_file}")
+    except Exception as e:
+        print(f"Error during claim evaluation: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    main()

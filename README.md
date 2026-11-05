@@ -2,104 +2,111 @@
 
 An AI-driven system that analyzes student learning reflections and evaluates whether claimed learning points are genuinely supported by the instructor's lecture materials (audio/video transcripts and lecture slides/notes).
 
+Every lecture maintains a **strictly isolated knowledge base** under `backend/data/lectures/{course_id}/{lecture_id}/`, and every student verification run queries **only** the explicitly specified lecture's knowledge base—preventing any cross-lecture or cross-subject contamination.
+
 ---
 
 ## Architecture & Pipeline Flow
 
-The system processes data across four sequential stages:
-
 ```
-[ Lecture Audio / Video / PDF ]
+[ Lecture Audio / Video + PDF Slides ]
               │
               ▼
-   1. Ingestion & Extraction (Whisper, PyMuPDF, python-pptx)
+   1. Ingestion & Extraction (Whisper + PyMuPDF / pypdf)
               │
               ▼
-   2. Processing & Chunking (Noise cleaning, sliding window, metadata)
+   2. Cleaning & Metadata-Rich Chunking (Timestamps & Page Numbers Preserved)
               │
               ▼
-   3. Vector Indexing & Retrieval (all-MiniLM-L6-v2 + FAISS)
+   3. Isolated Lecture Knowledge Base (all-MiniLM-L6-v2 + Independent FAISS Index)
               │
               ▼
-   4. Verification & Scoring (Gemini LLM claim extraction, evidence matching & multi-factor scoring)
+   4. Dynamic Student Verification & Scoring (Claims -> Lecture FAISS -> Evaluation -> 10-Mark Rubric)
 ```
 
 ---
 
-## Project Structure
+## Directory Architecture
 
 ```text
 lecture-feedback-system/
 ├── backend/
-│   ├── ingestion/               # Raw audio/video/pdf/ppt ingestion scripts
+│   ├── common/                  # Shared identifier validation & isolated path resolution
+│   │   └── paths.py
+│   ├── ingestion/               # Raw audio/video/pdf/ppt extraction modules
 │   │   ├── audio.py             # Whisper speech-to-text with chunked processing
-│   │   ├── pdf.py               # PDF text extractor (PyMuPDF / pypdf)
+│   │   ├── pdf.py               # PDF page-by-page text extractor (PyMuPDF / pypdf)
 │   │   └── ppt.py               # PowerPoint slide extractor (python-pptx)
-│   ├── processing/              # Cleaning, chunking, and dataset metadata
-│   │   ├── pipeline.py          # End-to-end processing pipeline
+│   ├── processing/              # Cleaning, chunking, metadata & dynamic concept derivation
+│   │   ├── pipeline.py          # Lecture processing pipeline
 │   │   ├── transcript_cleaner.py# Removes filler words and normalizes speech text
-│   │   ├── transcript_chunker.py# Sliding-window timestamp-aware chunker
+│   │   ├── transcript_chunker.py# Sliding-window timestamp-preserving chunker
 │   │   ├── pdf_cleaner.py       # Removes headers/footers, preserves equations
 │   │   ├── pdf_chunker.py       # Page-aware slide/document chunker
-│   │   └── metadata.py          # Chunk metadata schemas and validation
-│   ├── retrival/                # Vector store and semantic search
+│   │   └── metadata.py          # Chunk validation & lecture-derived concept extraction
+│   ├── retrival/                # Lecture-isolated vector store & semantic search
 │   │   ├── embedding.py         # SentenceTransformer wrapper (all-MiniLM-L6-v2)
-│   │   ├── vector_store.py      # FAISS IndexFlatIP (cosine similarity) helper
-│   │   ├── build_index.py       # Builds FAISS index from processed chunks
-│   │   └── search.py            # Top-K semantic similarity search
-│   └── verification/            # Student feedback verification & LLM evaluation
-│       ├── claims.py            # Extracts atomic claims from student reflections
-│       ├── retrieve_evidence.py # Matches claims to lecture chunks via FAISS
-│       ├── evaluvator.py        # Evaluates claims vs evidence using Google Gemini
-│       ├── scorer.py            # Multi-factor scoring (accuracy, coverage, depth)
-│       └── test_gemini.py       # Quick sanity test for Gemini API connectivity
-├── data/
-│   ├── raw/                     # Original lecture audio, pdf, video, student CSVs
-│   ├── processed/               # Cleaned texts, JSON chunks, dataset summaries
-│   ├── vector_store/            # FAISS index (.faiss) and chunk mappings (.json)
-│   └── results/                 # Evaluation outputs, evidence matches, scores
-├── tests/                       # Unit and integration test suites
-│   ├── run_tests.py             # Test runner
+│   │   ├── vector_store.py      # FAISS IndexFlatIP + strict mapping/vector validation
+│   │   ├── build_index.py       # Builds isolated lecture FAISS knowledge base
+│   │   └── search.py            # Top-K semantic search scoped to {course_id}/{lecture_id}
+│   ├── verification/            # Dynamic student claim verification & scoring
+│   │   ├── llm_client.py        # LLM client (Gemini / OpenRouter) with secret redaction
+│   │   ├── claims.py            # CSV validation & atomic claim extraction
+│   │   ├── retrieve_evidence.py # Matches claims strictly against selected lecture KB
+│   │   ├── evaluvator.py        # Evaluates claims vs lecture evidence
+│   │   ├── scorer.py            # Dynamic 10-mark rubric (Accuracy /5, Coverage /3, Understanding /2)
+│   │   └── pipeline.py          # Master dynamic verification runner
+│   ├── data/                    # Dynamically managed per-course / per-lecture storage
+│   │   ├── lectures/
+│   │   │   └── {course_id}/
+│   │   │       └── {lecture_id}/
+│   │   │           ├── raw/
+│   │   │           │   ├── <audio_file>
+│   │   │           │   └── <pdf_file>
+│   │   │           ├── processed/
+│   │   │           │   ├── transcript_raw.json
+│   │   │           │   ├── transcript_clean.json
+│   │   │           │   ├── transcript_chunks.json
+│   │   │           │   ├── pdf_raw.json
+│   │   │           │   ├── pdf_clean.json
+│   │   │           │   └── pdf_chunks.json
+│   │   │           ├── metadata/
+│   │   │           │   └── dataset_metadata.json
+│   │   │           └── knowledge_base/
+│   │   │               ├── index.faiss
+│   │   │               ├── embeddings.npy
+│   │   │               └── chunk_mapping.json
+│   │   └── results/
+│   │       └── {course_id}/
+│   │           └── {lecture_id}/
+│   │               ├── {student_id}/
+│   │               │   ├── claims.json
+│   │               │   ├── evidence.json
+│   │               │   ├── evaluated.json
+│   │               │   └── score.json
+│   │               └── all_students_summary.json
+│   └── run_lecture_pipeline.py  # Master lecture ingestion CLI
+├── tests/                       # Automated unit & isolation test suites
+│   ├── run_tests.py
+│   ├── test_lecture_isolation_and_verification.py
 │   ├── test_metadata.py
 │   ├── test_pdf_processing.py
+│   ├── test_retrieval.py
 │   └── test_transcript_processing.py
-├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## Prerequisites
-
-- **Python 3.10+** (Python 3.10 - 3.12 recommended)
-- **Git**
-- **Google Gemini API Key** (Required for verification stage)
-  - Get an API key from [Google AI Studio](https://aistudio.google.com/)
-
----
-
 ## Installation & Setup
 
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/Tejaswimadguni/lecture-feedback-system.git
-cd lecture-feedback-system
-```
-
-### 2. Create and Activate a Virtual Environment
+### 1. Create and Activate a Virtual Environment
 
 **Windows (PowerShell):**
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-```
-
-**Windows (Command Prompt):**
-```cmd
-python -m venv venv
-venv\Scripts\activate.bat
 ```
 
 **macOS / Linux:**
@@ -108,179 +115,130 @@ python3 -m venv venv
 source venv/bin/activate
 ```
 
-### 3. Install Dependencies
+### 2. Install Dependencies
 
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> **Note on FFmpeg:** Whisper relies on FFmpeg for audio decoding. `imageio-ffmpeg` is included in `requirements.txt` to provide a pre-compiled FFmpeg binary automatically. If you prefer using system FFmpeg, install it via `winget install Gyan.FFmpeg` (Windows) or `brew install ffmpeg` (macOS).
+### 3. Configure Environment Variables
 
-### 4. Configure Environment Variables
+Create a `.env` file in `lecture-feedback-system/`:
 
-Create a `.env` file in the project root or export `GEMINI_API_KEY`:
-
-**In `.env`:**
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
+# Or optionally:
+# OPENROUTER_API_KEY=sk-or-v1-...
 ```
-
-**Or export directly:**
-- **Windows (PowerShell):** `$env:GEMINI_API_KEY="your_api_key_here"`
-- **Windows (CMD):** `set GEMINI_API_KEY=your_api_key_here`
-- **Linux / macOS:** `export GEMINI_API_KEY="your_api_key_here"`
 
 ---
 
-## Quick Start: Single-Command Master Pipeline
+## Usage: Lecture Ingestion Pipeline
 
-You can execute the entire lecture ingestion, cleaning, chunking, and FAISS vector indexing pipeline in a **single command** using `backend/run_lecture_pipeline.py`:
+Every lecture ingestion requires explicit identifiers (`--course-id`, `--lecture-id`, `--course-name`, `--lecture-title`) and explicit input file paths (`--audio`, `--pdf`). No default lecture IDs or filenames are ever assumed.
 
+### Ingest Lecture 1:
 ```bash
 python backend/run_lecture_pipeline.py \
-    --audio data/raw/audio/6100l-lecture-1-version-2_360p_16_9.mp3 \
-    --pdf data/raw/pdf/mit6_100l_f22_lec01.pdf \
-    --course-id MIT_6_100L \
-    --lecture-id lec01
+    --course-id DBMS \
+    --lecture-id DBMS_lect1 \
+    --course-name "Database Management Systems" \
+    --lecture-title "Normalization" \
+    --audio "data/raw/audio/normalization.mp3" \
+    --pdf "data/raw/pdf/normalization.pdf"
 ```
 
-### Available Pipeline Flags:
-| Argument | Description | Default |
+### Ingest Lecture 2:
+```bash
+python backend/run_lecture_pipeline.py \
+    --course-id DBMS \
+    --lecture-id DBMS_lect2 \
+    --course-name "Database Management Systems" \
+    --lecture-title "SQL Joins" \
+    --audio "data/raw/audio/sql_joins.mp3" \
+    --pdf "data/raw/pdf/sql_joins.pdf"
+```
+
+### Ingestion CLI Flags:
+| Argument | Required | Description |
 |---|---|---|
-| `--audio <path>` | Path to lecture audio/video file (`.mp3`, `.mp4`, `.wav`) | *Sample MP3 if present* |
-| `--pdf <path>` | Path to lecture notes/slides PDF | *Sample PDF if present* |
-| `--course-id <id>` | Course identifier | `MIT_6_100L` |
-| `--lecture-id <id>` | Lecture identifier | Derived from filename or `lec01` |
-| `--course-name <name>`| Human-readable course name | `Introduction to CS` |
-| `--lecture-title <title>`| Lecture title | `Introduction` |
-| `--whisper-model <size>`| Whisper model (`tiny`, `base`, `small`, `medium`, `large`) | `base` |
-| `--force-rebuild` | Wipe existing vector index and rebuild from scratch | `False` (incremental deduplication) |
-
-> **Directory Management & Deduplication:**
-> The master pipeline automatically creates `data/processed/transcripts/`, `data/processed/pdf_text/`, `data/processed/metadata/`, and `data/vector_store/`. Rerunning the pipeline for the same lecture updates existing chunks in the FAISS index and chunk mapping without creating duplicate entries.
-
----
-
-## Individual Step-by-Step Pipeline Execution (Alternative)
-
-If you prefer to run individual modules manually:
-
-### Step 1: Ingestion (Extract text from audio and slides)
-
-Extract lecture transcript from audio:
-```bash
-python backend/ingestion/audio.py --audio data/raw/audio/6100l-lecture-1-version-2_360p_16_9.mp3
-```
-
-Extract lecture notes from PDF:
-```bash
-python backend/ingestion/pdf.py --pdf data/raw/pdf/mit6_100l_f22_lec01.pdf
-```
-
-*(Optional)* Extract from PowerPoint (.pptx):
-```bash
-python backend/ingestion/ppt.py --ppt path/to/lecture.pptx
-```
+| `--course-id <id>` | Yes | Explicit course/subject identifier (e.g. `DBMS`) |
+| `--lecture-id <id>` | Yes | Explicit lecture identifier (e.g. `DBMS_lect1`) |
+| `--course-name <name>` | Yes | Human-readable course name |
+| `--lecture-title <title>` | Yes | Human-readable lecture title |
+| `--audio <path>` | Yes* | Path to lecture audio/video (`.mp3`, `.mp4`, `.wav`, `.m4a`, etc.) |
+| `--pdf <path>` | Yes* | Path to lecture slides/notes PDF (`.pdf`) |
+| `--audio-only` | No | Explicitly run audio-only ingestion without a PDF |
+| `--pdf-only` | No | Explicitly run PDF-only ingestion without an audio file |
+| `--whisper-model <size>` | No | Whisper model (`tiny`, `base`, `small`, `medium`, `large`; default: `base`) |
+| `--device <cpu\|cuda>` | No | PyTorch device for Whisper |
+| `--force-reprocess` | No | Force fresh transcription/extraction and replace this lecture's KB |
 
 ---
 
-### Step 2: Processing & Chunking
+## Usage: Student Feedback Verification Pipeline
 
-Clean the raw transcript and PDF texts, generate time-stamped / page-aware chunks, and produce dataset metadata:
+Verification requires `--course-id`, `--lecture-id`, and `--feedback-csv`. It resolves `backend/data/lectures/{course_id}/{lecture_id}/knowledge_base/` automatically, verifies integrity before starting, and writes isolated student results under `backend/data/results/{course_id}/{lecture_id}/`.
+
+### Verify Lecture 1 Student Feedback:
 ```bash
-python backend/processing/pipeline.py
+python backend/verification/pipeline.py \
+    --course-id DBMS \
+    --lecture-id DBMS_lect1 \
+    --feedback-csv "data/raw/students/dbms_lect1_feedback.csv"
 ```
-Outputs generated in `data/processed/`:
-- `data/processed/transcripts/lecture_01_chunks.json`
-- `data/processed/pdf_text/lecture_01_chunks.json`
-- `data/processed/metadata/dataset_metadata.json`
+
+### Verify Lecture 2 Student Feedback:
+```bash
+python backend/verification/pipeline.py \
+    --course-id DBMS \
+    --lecture-id DBMS_lect2 \
+    --feedback-csv "data/raw/students/dbms_lect2_feedback.csv"
+```
+
+### Verification CLI Flags:
+| Argument | Required | Description |
+|---|---|---|
+| `--course-id <id>` | Yes | Course identifier matching the ingested lecture |
+| `--lecture-id <id>` | Yes | Lecture identifier matching the ingested lecture |
+| `--feedback-csv <path>` | Yes | Path to student feedback `.csv` file |
+| `--student-id-column <col>` | No | CSV column for student ID (default: `roll_number`) |
+| `--feedback-column <col>` | No | CSV column for student feedback text (default: `feedback`) |
+| `--top-k <int>` | No | Top-K lecture chunks retrieved per claim (default: `5`) |
+| `--output-dir <path>` | No | Optional custom results output directory |
+| `--strict-llm` | No | Fail immediately on missing LLM API credentials or API errors |
 
 ---
 
-### Step 3: Vector Store & Semantic Retrieval
+## Standalone Lecture Semantic Search
 
-#### A. Build the FAISS Index
-Generate dense vector embeddings (`all-MiniLM-L6-v2`) and build the FAISS index:
-```bash
-python backend/retrival/build_index.py
-```
-This saves:
-- `data/vector_store/lecture_index.faiss`
-- `data/vector_store/chunk_mapping.json`
+Query a specific lecture's isolated knowledge base directly:
 
-#### B. Test Semantic Search
-Verify that queries retrieve relevant lecture chunks:
 ```bash
-python backend/retrival/search.py
+python backend/retrival/search.py \
+    --course-id DBMS \
+    --lecture-id DBMS_lect1 \
+    --query "What does Third Normal Form eliminate?" \
+    --top-k 5
 ```
 
 ---
 
-### Step 4: Student Verification & LLM Evaluation
+## Scoring Rubric (10 Marks Total)
 
-#### A. Sanity Check Gemini API
-Verify your Gemini API credentials:
-```bash
-python backend/verification/test_gemini.py
-```
-
-#### B. Extract Student Claims
-Parse student reflections from `data/raw/students/lecture_feedback_25_students.csv` into atomic factual claims:
-```bash
-python backend/verification/claims.py
-```
-Output: `data/results/student_01_claims.json`
-
-#### C. Retrieve Lecture Evidence
-Query the FAISS vector index to find the most relevant chunks for each extracted claim:
-```bash
-python backend/verification/retrieve_evidence.py
-```
-Output: `data/results/student_01_evidence.json`
-
-#### D. Evaluate Claims with LLM
-Use Gemini to evaluate whether each claim is **Supported**, **Partially Supported**, or **Unsupported** by the retrieved lecture evidence:
-```bash
-python backend/verification/evaluvator.py
-```
-Output: `data/results/student_01_evaluated.json`
-
-#### E. Calculate Final Verification Scores
-Compute accuracy, coverage, and understanding depth scores:
-```bash
-python backend/verification/scorer.py
-```
-Output: `data/results/student_01_score.json`
+- **Factual Accuracy (5 marks):** Proportion of student claims verified as `SUPPORTED` (`1.0`) or `PARTIALLY_SUPPORTED` (`0.5`) against retrieved lecture evidence.
+- **Lecture Coverage (3 marks):** Proportion of the selected lecture's dynamically derived concept units (`dataset_metadata.json` / lecture chunks) covered by the student's supported claims.
+- **Understanding Quality (2 marks):** Combines factual precision and verified claim depth.
 
 ---
 
 ## Running Tests
 
-Run the test suite with either `pytest` or the standalone runner:
-
 ```bash
-# Using pytest
-pytest
+# Run via pytest
+pytest tests -v
 
-# Using standalone runner
+# Run via standalone test runner
 python tests/run_tests.py
 ```
-
----
-
-## Troubleshooting
-
-1. **`ModuleNotFoundError: No module named 'sentence_transformers'` or `faiss`**
-   - Ensure your virtual environment is activated and run:
-     ```bash
-     pip install -r requirements.txt
-     ```
-2. **`ValueError: GEMINI_API_KEY is not set`**
-   - Make sure `GEMINI_API_KEY` is exported in your terminal or present in `.env`.
-3. **`FileNotFoundError: data/processed/.../lecture_01_chunks.json`**
-   - Run `python backend/processing/pipeline.py` before building the vector index.
-4. **`FileNotFoundError: data/vector_store/lecture_index.faiss`**
-   - Run `python backend/retrival/build_index.py` before running evidence retrieval.
-5. **Import errors when running scripts**
-   - Always run commands from the repository root directory (e.g. `python backend/retrival/build_index.py`).

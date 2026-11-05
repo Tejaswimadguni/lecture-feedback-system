@@ -1,7 +1,7 @@
 import os
 import sys
 
-# Ensure backend root is on sys.path
+# Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from tests.test_transcript_processing import (
@@ -23,6 +23,14 @@ from tests.test_retrieval import (
     test_vector_store_build_search_and_filter,
     test_semantic_search_end_to_end,
 )
+from tests.test_lecture_isolation_and_verification import (
+    test_1_2_3_4_separate_directories_kbs_and_reprocessing_isolation,
+    test_5_6_strict_retrieval_cross_lecture_isolation,
+    test_7_8_11_dynamic_verification_student_directories_custom_csv_and_scoring,
+    test_9_cli_requires_explicit_arguments_no_silent_defaults,
+    test_10_comprehensive_validation_and_error_handling,
+    test_cache_reuse_only_when_identity_and_config_match,
+)
 
 
 def run_all_tests():
@@ -38,13 +46,19 @@ def run_all_tests():
         ("test_embedding_model_shape_and_similarity", test_embedding_model_shape_and_similarity),
         ("test_vector_store_build_search_and_filter", test_vector_store_build_search_and_filter),
         ("test_semantic_search_end_to_end", test_semantic_search_end_to_end),
+        ("test_1_2_3_4_separate_directories_kbs_and_reprocessing_isolation", test_1_2_3_4_separate_directories_kbs_and_reprocessing_isolation),
+        ("test_5_6_strict_retrieval_cross_lecture_isolation", test_5_6_strict_retrieval_cross_lecture_isolation),
+        ("test_7_8_11_dynamic_verification_student_directories_custom_csv_and_scoring", test_7_8_11_dynamic_verification_student_directories_custom_csv_and_scoring),
+        ("test_9_cli_requires_explicit_arguments_no_silent_defaults", test_9_cli_requires_explicit_arguments_no_silent_defaults),
+        ("test_10_comprehensive_validation_and_error_handling", test_10_comprehensive_validation_and_error_handling),
+        ("test_cache_reuse_only_when_identity_and_config_match", test_cache_reuse_only_when_identity_and_config_match),
     ]
 
     passed = 0
     failed = 0
 
     print("=========================================")
-    print(" Running Full Test Suite (Section 2 + Section 3) ")
+    print(" Running Complete Automated Test Suite   ")
     print("=========================================")
 
     for name, func in test_functions:

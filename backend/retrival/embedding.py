@@ -1,3 +1,4 @@
+from typing import List, Union
 import numpy as np
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -8,7 +9,7 @@ _hf_model = None
 _use_hf_fallback = False
 
 
-def _init_model():
+def _init_model() -> None:
     """
     Initializes the embedding model.
     Tries SentenceTransformer first; if it fails (e.g. Windows DLL Application Control
@@ -23,9 +24,8 @@ def _init_model():
         from sentence_transformers import SentenceTransformer
         _st_model = SentenceTransformer("all-MiniLM-L6-v2")
         _use_hf_fallback = False
-    except Exception as e:
+    except Exception:
         # Fallback to direct HuggingFace PyTorch BertModel (no scipy / sklearn dependencies)
-        import torch
         from transformers import AutoTokenizer, BertModel
 
         _hf_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -34,7 +34,7 @@ def _init_model():
         _use_hf_fallback = True
 
 
-def generate_embeddings(texts):
+def generate_embeddings(texts: List[str]) -> np.ndarray:
     """
     Generate normalized embeddings for multiple texts.
     Returns NumPy float32 array of shape (N, 384).
@@ -49,7 +49,7 @@ def generate_embeddings(texts):
             texts,
             convert_to_numpy=True,
             normalize_embeddings=True,
-            show_progress_bar=False
+            show_progress_bar=False,
         )
         return embeddings.astype(np.float32)
 
@@ -62,7 +62,7 @@ def generate_embeddings(texts):
         padding=True,
         truncation=True,
         max_length=512,
-        return_tensors="pt"
+        return_tensors="pt",
     )
 
     with torch.no_grad():
@@ -77,9 +77,29 @@ def generate_embeddings(texts):
     return normalized.cpu().numpy().astype(np.float32)
 
 
-def generate_embedding(text):
+def generate_embedding(text: str) -> np.ndarray:
     """
     Generate an embedding for a single text.
     Returns NumPy float32 array of shape (1, 384).
     """
-    return generate_embeddings([text])
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Query text for embedding must be a non-empty string.")
+    return generate_embeddings([text.strip()])
+
+
+class EmbeddingModel:
+    """Object-oriented wrapper around the all-MiniLM-L6-v2 embedding generator."""
+
+    def encode(self, texts: Union[str, List[str]], normalize: bool = True) -> np.ndarray:
+        if isinstance(texts, str):
+            vecs = generate_embedding(texts)
+        else:
+            vecs = generate_embeddings(texts)
+        if not normalize and vecs.size > 0:
+            return vecs
+        return vecs
+
+    def similarity(self, text_a: str, text_b: str) -> float:
+        vecs = generate_embeddings([text_a, text_b])
+        score = float(np.dot(vecs[0], vecs[1]))
+        return max(0.0, min(1.0, score))

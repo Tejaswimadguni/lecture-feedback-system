@@ -1,0 +1,41 @@
+"""Shared path resolution and input validation utilities."""
+
+from .paths import (
+    PROJECT_ROOT,
+    DEFAULT_DATA_ROOT,
+    SUPPORTED_AUDIO_EXTENSIONS,
+    SUPPORTED_PDF_EXTENSIONS,
+    LecturePaths,
+    StudentResultPaths,
+    validate_identifier,
+    validate_non_empty_text,
+    sanitize_student_id,
+    get_data_root,
+    get_lecture_paths,
+    get_results_dir,
+    get_student_result_paths,
+    validate_audio_file,
+    validate_pdf_file,
+    validate_csv_file,
+    compute_file_sha256,
+)
+
+__all__ = [
+    "PROJECT_ROOT",
+    "DEFAULT_DATA_ROOT",
+    "SUPPORTED_AUDIO_EXTENSIONS",
+    "SUPPORTED_PDF_EXTENSIONS",
+    "LecturePaths",
+    "StudentResultPaths",
+    "validate_identifier",
+    "validate_non_empty_text",
+    "sanitize_student_id",
+    "get_data_root",
+    "get_lecture_paths",
+    "get_results_dir",
+    "get_student_result_paths",
+    "validate_audio_file",
+    "validate_pdf_file",
+    "validate_csv_file",
+    "compute_file_sha256",
+]

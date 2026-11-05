@@ -1,192 +1,176 @@
+import argparse
 import json
 import sys
 from pathlib import Path
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-sys.path.append(
-    str(PROJECT_ROOT / "backend" / "retrival")
-)
-
-from search import search
-# --------------------------------------------------
-# Project paths
-# --------------------------------------------------
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-CLAIMS_FILE = (
-    PROJECT_ROOT
-    / "data"
-    / "results"
-    / "student_01_claims.json"
-)
+from backend.common.paths import validate_identifier
+from backend.retrival.search import search
+from backend.retrival.vector_store import validate_and_load_knowledge_base
 
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "data"
-    / "results"
-)
-
-OUTPUT_FILE = (
-    OUTPUT_DIR
-    / "student_01_evidence.json"
-)
-
-
-# --------------------------------------------------
-# Load claims
-# --------------------------------------------------
-
-def load_claims(file_path):
-
-    with open(
-        file_path,
-        "r",
-        encoding="utf-8"
-    ) as file:
-
-        data = json.load(file)
-
-    return data
-
-
-# --------------------------------------------------
-# Retrieve evidence for each claim
-# --------------------------------------------------
 
 def retrieve_evidence(
-    claims,
-    top_k=5
-):
+    claims: List[Dict[str, Any]],
+    course_id: str,
+    lecture_id: str,
+    top_k: int = 5,
+    data_root: Optional[Union[str, Path]] = None,
+    loaded_kb: Optional[Tuple[Any, List[Dict[str, Any]]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieves Top-K lecture evidence chunks strictly from {course_id}/{lecture_id}'s
+    isolated knowledge base for each student claim.
+    """
+    valid_course_id = validate_identifier(course_id, "course_id")
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
+    if top_k < 1:
+        raise ValueError("top_k must be at least 1.")
 
-    results = []
+    kb = (
+        loaded_kb
+        if loaded_kb is not None
+        else validate_and_load_knowledge_base(
+            course_id=valid_course_id,
+            lecture_id=valid_lecture_id,
+            data_root=data_root,
+        )
+    )
 
+    results: List[Dict[str, Any]] = []
     for claim in claims:
-
         claim_id = claim["claim_id"]
         claim_text = claim["text"]
 
-        print("\n-----------------------------------")
-        print(f"Claim: {claim_id}")
-        print("-----------------------------------")
-
-        print(claim_text)
-
-        print("\nSearching lecture evidence...")
-
-        search_results = search(
-            claim_text,
-            top_k=top_k
+        search_hits = search(
+            query=claim_text,
+            course_id=valid_course_id,
+            lecture_id=valid_lecture_id,
+            top_k=top_k,
+            data_root=data_root,
+            loaded_kb=kb,
         )
 
-        evidence = []
-
-        for result in search_results:
-
-            evidence.append({
-                "score": result["score"],
-                "chunk_id": result["chunk_id"],
-                "source_type": result["source_type"],
-                "source_file": result["source_file"],
-                "page": result["page"],
-                "start_time": result["start_time"],
-                "end_time": result["end_time"],
-                "text": result["text"]
+        evidence_items: List[Dict[str, Any]] = []
+        for hit in search_hits:
+            if hit.get("course_id") != valid_course_id or hit.get("lecture_id") != valid_lecture_id:
+                raise ValueError(
+                    f"Evidence isolation violation: expected {valid_course_id}/{valid_lecture_id}, "
+                    f"got {hit.get('course_id')}/{hit.get('lecture_id')}."
+                )
+            evidence_items.append({
+                "score": hit["score"],
+                "vector_id": hit["vector_id"],
+                "course_id": hit["course_id"],
+                "lecture_id": hit["lecture_id"],
+                "chunk_id": hit["chunk_id"],
+                "source_type": hit["source_type"],
+                "source_file": hit["source_file"],
+                "page": hit["page"],
+                "start_time": hit["start_time"],
+                "end_time": hit["end_time"],
+                "text": hit["text"],
             })
 
         results.append({
             "claim_id": claim_id,
             "claim": claim_text,
-            "evidence": evidence
+            "evidence": evidence_items,
         })
-
-        if evidence:
-
-            print(
-                f"\nTop evidence "
-                f"(similarity: {evidence[0]['score']:.4f})"
-            )
-
-            print(
-                f"Source: {evidence[0]['source_type']}"
-            )
-
-            if evidence[0]["page"] is not None:
-
-                print(
-                    f"Page: {evidence[0]['page']}"
-                )
-
-            if evidence[0]["start_time"] is not None:
-
-                print(
-                    f"Time: "
-                    f"{evidence[0]['start_time']:.2f}"
-                    f" - "
-                    f"{evidence[0]['end_time']:.2f}"
-                )
-
-            safe_text = evidence[0]['text'].replace('\uf0a7', '-').encode('ascii', errors='backslashreplace').decode('ascii')
-            print(
-                f"Text: {safe_text[:120]}..."
-            )
 
     return results
 
 
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
+def retrieve_student_evidence_to_file(
+    claims_path: Union[str, Path],
+    output_path: Union[str, Path],
+    course_id: str,
+    lecture_id: str,
+    top_k: int = 5,
+    data_root: Optional[Union[str, Path]] = None,
+    loaded_kb: Optional[Tuple[Any, List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
+    """
+    Reads an explicit student claims.json file, retrieves evidence strictly from
+    {course_id}/{lecture_id}'s knowledge base, and writes evidence.json to output_path.
+    """
+    valid_course_id = validate_identifier(course_id, "course_id")
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
 
-def main(target_roll_number=None):
-    print("\n===================================")
-    print("CLAIM -> EVIDENCE RETRIEVAL")
-    print("===================================")
+    src = Path(claims_path).resolve()
+    if not src.exists():
+        raise FileNotFoundError(f"Claims file not found: {src}")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(src, "r", encoding="utf-8") as f:
+        claims_data = json.load(f)
 
-    if target_roll_number is not None:
-        claim_files = [OUTPUT_DIR / f"student_{int(target_roll_number):02d}_claims.json"]
-    else:
-        claim_files = sorted(list(OUTPUT_DIR.glob("student_*_claims.json")))
+    if (
+        claims_data.get("course_id") != valid_course_id
+        or claims_data.get("lecture_id") != valid_lecture_id
+    ):
+        raise ValueError(
+            f"Claims file {src} belongs to {claims_data.get('course_id')}/{claims_data.get('lecture_id')}, "
+            f"expected {valid_course_id}/{valid_lecture_id}."
+        )
 
-    if not claim_files and CLAIMS_FILE.exists():
-        claim_files = [CLAIMS_FILE]
+    student_id = claims_data["student_id"]
+    claims_list = claims_data.get("claims", [])
 
-    print(f"\nFound {len(claim_files)} claim files to process...")
+    matched_claims = retrieve_evidence(
+        claims=claims_list,
+        course_id=valid_course_id,
+        lecture_id=valid_lecture_id,
+        top_k=top_k,
+        data_root=data_root,
+        loaded_kb=loaded_kb,
+    )
 
-    for c_file in claim_files:
-        if not c_file.exists():
-            continue
+    payload = {
+        "student_id": student_id,
+        "sanitized_student_id": claims_data.get("sanitized_student_id", student_id),
+        "course_id": valid_course_id,
+        "lecture_id": valid_lecture_id,
+        "total_claims": len(matched_claims),
+        "claims": matched_claims,
+    }
 
-        data = load_claims(c_file)
-        roll_number = data.get("roll_number", 1)
-        claims = data.get("claims", [])
+    dest = Path(output_path).resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
-        print(f"\nRetrieving evidence for Roll No. {roll_number} ({len(claims)} claims)...")
-        results = retrieve_evidence(claims, top_k=5)
+    return payload
 
-        output = {
-            "roll_number": roll_number,
-            "total_claims": len(claims),
-            "claims": results
-        }
 
-        out_file = OUTPUT_DIR / f"student_{roll_number:02d}_evidence.json"
-        with open(out_file, "w", encoding="utf-8") as file:
-            json.dump(output, file, indent=2, ensure_ascii=False)
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Retrieve lecture-isolated FAISS evidence for a student's extracted claims."
+    )
+    parser.add_argument("--course-id", required=True, help="Explicit course identifier.")
+    parser.add_argument("--lecture-id", required=True, help="Explicit lecture identifier.")
+    parser.add_argument("--claims-file", required=True, help="Explicit path to student claims.json.")
+    parser.add_argument("--output-file", required=True, help="Explicit path to output evidence.json.")
+    parser.add_argument("--top-k", type=int, default=5, help="Top-K chunks per claim (default: 5).")
+    parser.add_argument("--data-root", default=None, help="Optional custom data root directory.")
 
-        if roll_number == 1:
-            with open(OUTPUT_FILE, "w", encoding="utf-8") as file:
-                json.dump(output, file, indent=2, ensure_ascii=False)
-
-    print("\n===================================")
-    print("EVIDENCE RETRIEVAL COMPLETE")
-    print(f"Processed {len(claim_files)} students. Saved to {OUTPUT_DIR}")
-    print("===================================")
+    args = parser.parse_args(argv)
+    try:
+        retrieve_student_evidence_to_file(
+            claims_path=args.claims_file,
+            output_path=args.output_file,
+            course_id=args.course_id,
+            lecture_id=args.lecture_id,
+            top_k=args.top_k,
+            data_root=args.data_root,
+        )
+        print(f"Saved retrieved evidence to {args.output_file}")
+    except Exception as e:
+        print(f"Error during evidence retrieval: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    main()

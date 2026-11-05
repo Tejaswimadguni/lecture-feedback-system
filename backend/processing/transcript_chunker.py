@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
 
 try:
     from .metadata import create_chunk_metadata
@@ -13,21 +13,21 @@ def count_words(text: str) -> int:
 
 def chunk_transcript(
     segments: List[Dict[str, Any]],
-    course_id: str = "MIT_6_100L",
-    lecture_id: str = "lec01",
+    course_id: str,
+    lecture_id: str,
     target_word_count: int = 350,
     overlap_word_count: int = 50,
-    course_name: str = "Introduction to CS",
-    lecture_title: str = "Introduction",
-    source_file: str = "lecture_01.mp4",
+    course_name: str = "",
+    lecture_title: str = "",
+    source_file: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Chunks transcript segments based on cumulative word count while preserving start and end timestamps.
 
     Args:
         segments: Cleaned transcript segment objects [{'start': float, 'end': float, 'text': str}].
-        course_id: Unique identifier for the course.
-        lecture_id: Unique identifier for the lecture.
+        course_id: Explicit unique identifier for the course (required).
+        lecture_id: Explicit unique identifier for the lecture (required).
         target_word_count: Target number of words per chunk (default ~350).
         overlap_word_count: Target number of overlapping words between consecutive chunks (default ~50).
         course_name: Name of the course.
@@ -37,6 +37,11 @@ def chunk_transcript(
     Returns:
         List of chunk dictionaries formatted according to the unified metadata schema.
     """
+    if not course_id or not str(course_id).strip():
+        raise ValueError("course_id is required for transcript chunking.")
+    if not lecture_id or not str(lecture_id).strip():
+        raise ValueError("lecture_id is required for transcript chunking.")
+
     if not segments:
         return []
 
@@ -63,27 +68,28 @@ def chunk_transcript(
                 break
 
         # Build chunk text and timestamps from accumulated segments
-        chunk_text = " ".join(seg["text"] for seg in current_window)
-        start_time = current_window[0]["start"]
-        end_time = current_window[-1]["end"]
+        chunk_text = " ".join(seg["text"] for seg in current_window).strip()
+        if chunk_text:
+            start_time = current_window[0]["start"]
+            end_time = current_window[-1]["end"]
 
-        chunk_id = f"{course_id}_{lecture_id}_T{chunk_index:03d}"
+            chunk_id = f"{course_id}_{lecture_id}_T{chunk_index:03d}"
 
-        chunk = create_chunk_metadata(
-            chunk_id=chunk_id,
-            course_id=course_id,
-            lecture_id=lecture_id,
-            source_type="transcript",
-            text=chunk_text,
-            course_name=course_name,
-            lecture_title=lecture_title,
-            source_file=source_file,
-            start_time=start_time,
-            end_time=end_time,
-            page=None,
-        )
-        chunks.append(chunk)
-        chunk_index += 1
+            chunk = create_chunk_metadata(
+                chunk_id=chunk_id,
+                course_id=course_id,
+                lecture_id=lecture_id,
+                source_type="transcript",
+                text=chunk_text,
+                course_name=course_name,
+                lecture_title=lecture_title,
+                source_file=source_file,
+                start_time=start_time,
+                end_time=end_time,
+                page=None,
+            )
+            chunks.append(chunk)
+            chunk_index += 1
 
         # If we reached the end of segments, break
         if end_idx >= num_segments:

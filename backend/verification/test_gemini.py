@@ -1,46 +1,26 @@
-import os
-from dotenv import load_dotenv
-import requests
+import sys
+from pathlib import Path
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-openrouter_key = os.getenv("OPENROUTER_API_KEY")
-gemini_key = os.getenv("GEMINI_API_KEY")
+from backend.verification.llm_client import LLMAPIError, call_llm_json, redact_secrets
 
-print("\n===================================")
-print("LLM API TEST")
-print("===================================")
 
-if openrouter_key and openrouter_key.startswith("sk-or-"):
-    print("Using OpenRouter API...")
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {openrouter_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "google/gemini-2.5-flash",
-        "max_tokens": 1000,
-        "messages": [
-            {"role": "user", "content": "In one sentence, explain what declarative knowledge means."}
-        ]
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        content = response.json()["choices"][0]["message"]["content"]
+def main() -> None:
+    print("\n===================================")
+    print("LLM API CONNECTIVITY TEST")
+    print("===================================")
+    prompt = 'Return ONLY valid JSON: {"status": "ok", "message": "API connectivity verified."}'
+    try:
+        res = call_llm_json(prompt=prompt, max_tokens=100, strict_llm=True)
         print("\nAPI Response:")
-        print(content)
-    else:
-        print(f"Error {response.status_code}: {response.text}")
-elif gemini_key:
-    from google import genai
-    print("Using Gemini API...")
-    client = genai.Client(api_key=gemini_key)
-    interaction = client.interactions.create(
-        model="gemini-2.5-flash",
-        input="In one sentence, explain what declarative knowledge means."
-    )
-    print("\nAPI Response:")
-    print(interaction.output_text)
-else:
-    raise ValueError("Neither OPENROUTER_API_KEY nor GEMINI_API_KEY found in .env")
+        print(res)
+    except LLMAPIError as exc:
+        print(f"LLM API check failed: {redact_secrets(exc)}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

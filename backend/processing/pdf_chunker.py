@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
 
 try:
     from .metadata import create_chunk_metadata
@@ -13,20 +13,20 @@ def count_words(text: str) -> int:
 
 def chunk_pdf(
     pages: List[Dict[str, Any]],
-    course_id: str = "MIT_6_100L",
-    lecture_id: str = "lec01",
+    course_id: str,
+    lecture_id: str,
     target_word_count: int = 350,
-    course_name: str = "Introduction to CS",
-    lecture_title: str = "Introduction",
-    source_file: str = "lecture_01.pdf",
+    course_name: str = "",
+    lecture_title: str = "",
+    source_file: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Page-aware PDF chunker. Groups page text into chunks while preserving exact page numbers.
 
     Args:
         pages: Cleaned PDF page dictionaries [{'page': int, 'text': str}].
-        course_id: Identifier for the course.
-        lecture_id: Identifier for the lecture.
+        course_id: Explicit identifier for the course (required).
+        lecture_id: Explicit identifier for the lecture (required).
         target_word_count: Target maximum words per chunk on a page before splitting.
         course_name: Full name of the course.
         lecture_title: Title of the lecture.
@@ -35,6 +35,11 @@ def chunk_pdf(
     Returns:
         List of chunk dicts formatted according to the unified metadata schema.
     """
+    if not course_id or not str(course_id).strip():
+        raise ValueError("course_id is required for PDF chunking.")
+    if not lecture_id or not str(lecture_id).strip():
+        raise ValueError("lecture_id is required for PDF chunking.")
+
     if not pages:
         return []
 

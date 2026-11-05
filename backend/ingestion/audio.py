@@ -1,16 +1,30 @@
-import os
-import json
 import argparse
+import json
+import logging
+import os
 import re
 import shutil
-import tempfile
 import subprocess
-import logging
-from typing import Dict, Any, Optional
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.common.paths import (
+    compute_file_sha256,
+    get_lecture_paths,
+    validate_audio_file,
+    validate_identifier,
+)
 
 # Configure production logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
 
 def _get_ffmpeg_exe() -> str:
     """
@@ -43,23 +57,23 @@ except Exception:
     pass
 
 
-def derive_lecture_id(file_path: str) -> str:
-    """Derives a lecture ID from a filename by stripping path and extension."""
-    basename = os.path.basename(file_path)
-    lecture_id, _ = os.path.splitext(basename)
-    return lecture_id
-
-
 def get_audio_duration(audio_path: str) -> float:
     """
     Gets total duration of an audio/video file in seconds using ffmpeg.
     Supports both HH:MM:SS.ms and HH:MM:SS duration formats.
     """
     ffmpeg_exe = _get_ffmpeg_exe()
-    cmd = [ffmpeg_exe, "-i", audio_path]
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    cmd = [ffmpeg_exe, "-i", str(audio_path)]
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     _, stderr = process.communicate()
-    
+
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr)
     if match:
         hours, minutes, seconds = match.groups()
@@ -69,10 +83,11 @@ def get_audio_duration(audio_path: str) -> float:
 
 def transcribe_audio(
     audio_path: str,
+    lecture_id: str,
+    course_id: Optional[str] = None,
     model_size: str = "base",
-    lecture_id: Optional[str] = None,
     device: Optional[str] = None,
-    chunk_length_sec: int = 180
+    chunk_length_sec: int = 180,
 ) -> Dict[str, Any]:
     """
     Production audio ingestion module using OpenAI Whisper.
@@ -80,29 +95,18 @@ def transcribe_audio(
 
     Args:
         audio_path: Path to the input audio or video file (e.g. .mp4, .mp3, .wav).
+        lecture_id: Explicit identifier for the lecture (required).
+        course_id: Optional course identifier to record in raw transcript metadata.
         model_size: OpenAI Whisper model size ('tiny', 'base', 'small', 'medium', 'large').
-        lecture_id: Identifier for the lecture. If None, derived from filename.
         device: Torch device ('cpu', 'cuda', etc.). If None, automatically selected by Whisper.
         chunk_length_sec: Length of audio chunks in seconds for long audio files (default: 180s / 3 minutes).
 
     Returns:
-        Dict containing lecture_id and a list of timestamped segment objects:
-        {
-          "lecture_id": "lecture_01",
-          "segments": [
-            {
-              "start": 0.0,
-              "end": 5.2,
-              "text": "Welcome to the course."
-            }
-          ]
-        }
+        Dict containing explicit identifiers, source metadata, and timestamped segment objects.
     """
-    if not os.path.exists(audio_path):
-        raise FileNotFoundError(f"Audio/video file not found at: {audio_path}")
-
-    if not lecture_id:
-        lecture_id = derive_lecture_id(audio_path)
+    valid_audio = validate_audio_file(audio_path)
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
+    valid_course_id = validate_identifier(course_id, "course_id") if course_id is not None else None
 
     try:
         import whisper
@@ -111,10 +115,10 @@ def transcribe_audio(
             "openai-whisper package is required. Install it using: pip install -U openai-whisper torch"
         ) from e
 
-    duration = get_audio_duration(audio_path)
-    logger.info(f"Ingesting audio file: {audio_path} (Detected Duration: {duration:.1f}s)")
+    duration = get_audio_duration(str(valid_audio))
+    logger.info(f"Ingesting audio file: {valid_audio} (Detected Duration: {duration:.1f}s)")
     logger.info(f"Loading Whisper model '{model_size}'...")
-    
+
     model = whisper.load_model(model_size, device=device)
     all_segments = []
 
@@ -128,12 +132,25 @@ def transcribe_audio(
             while current_start < duration:
                 chunk_file = os.path.join(temp_dir, f"chunk_{chunk_index:04d}.wav")
                 end_sec = min(current_start + chunk_length_sec, duration)
-                logger.info(f"  --> Transcribing chunk {chunk_index + 1} ({current_start:.0f}s - {end_sec:.0f}s)...")
-                
+                logger.info(
+                    f"  --> Transcribing chunk {chunk_index + 1} ({current_start:.0f}s - {end_sec:.0f}s)..."
+                )
+
                 # Extract 16kHz mono WAV chunk using ffmpeg
                 cmd = [
-                    _get_ffmpeg_exe(), "-y", "-ss", str(current_start), "-t", str(chunk_length_sec),
-                    "-i", audio_path, "-ar", "16000", "-ac", "1", chunk_file
+                    _get_ffmpeg_exe(),
+                    "-y",
+                    "-ss",
+                    str(current_start),
+                    "-t",
+                    str(chunk_length_sec),
+                    "-i",
+                    str(valid_audio),
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    chunk_file,
                 ]
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
@@ -148,7 +165,7 @@ def transcribe_audio(
                         all_segments.append({
                             "start": start_time,
                             "end": end_time,
-                            "text": text
+                            "text": text,
                         })
 
                 current_start += chunk_length_sec
@@ -157,7 +174,7 @@ def transcribe_audio(
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
     else:
-        result = model.transcribe(audio_path)
+        result = model.transcribe(str(valid_audio))
         raw_segments = result.get("segments", [])
         for seg in raw_segments:
             text = str(seg.get("text", "")).strip()
@@ -165,135 +182,93 @@ def transcribe_audio(
                 all_segments.append({
                     "start": round(float(seg.get("start", 0.0)), 2),
                     "end": round(float(seg.get("end", 0.0)), 2),
-                    "text": text
+                    "text": text,
                 })
 
     logger.info(f"Transcription complete: Extracted {len(all_segments)} timestamped segments.")
-    return {
-        "lecture_id": lecture_id,
-        "segments": all_segments
+    payload: Dict[str, Any] = {
+        "lecture_id": valid_lecture_id,
+        "source_file": valid_audio.name,
+        "source_sha256": compute_file_sha256(valid_audio),
+        "whisper_model": model_size,
+        "segments": all_segments,
     }
+    if valid_course_id is not None:
+        payload["course_id"] = valid_course_id
+    return payload
 
 
 def save_transcript_json(
     audio_path: str,
+    course_id: str,
+    lecture_id: str,
     output_path: Optional[str] = None,
     model_size: str = "base",
-    lecture_id: Optional[str] = None
+    device: Optional[str] = None,
+    data_root: Optional[str] = None,
 ) -> str:
     """
-    Transcribes audio/video file and saves timestamped segments to a JSON file.
-
-    Args:
-        audio_path: Path to input audio/video file.
-        output_path: Path where JSON should be saved. If None, defaults to data/processed/transcripts/<lecture_id>_transcript.json.
-        model_size: OpenAI Whisper model size.
-        lecture_id: Identifier for the lecture. If None, derived from filename.
-
-    Returns:
-        Path to the saved JSON file.
+    Transcribes audio/video file and saves timestamped segments to the lecture's isolated processed path
+    (or an explicitly supplied output_path).
     """
-    data = transcribe_audio(audio_path, model_size=model_size, lecture_id=lecture_id)
+    valid_course_id = validate_identifier(course_id, "course_id")
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
 
-    if not output_path:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        output_dir = os.path.join(base_dir, "data", "processed", "transcripts")
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f"{data['lecture_id']}_transcript.json")
+    data = transcribe_audio(
+        audio_path=audio_path,
+        lecture_id=valid_lecture_id,
+        course_id=valid_course_id,
+        model_size=model_size,
+        device=device,
+    )
+
+    if output_path:
+        dest = Path(output_path).resolve()
     else:
-        parent_dir = os.path.dirname(os.path.abspath(output_path))
-        if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
+        lpaths = get_lecture_paths(valid_course_id, valid_lecture_id, data_root=data_root)
+        dest = lpaths.transcript_raw
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-    return output_path
+    return str(dest)
 
 
-def find_all_raw_audio() -> list[str]:
-    """Finds all available raw audio or video files in data/raw/audio or data/raw/video."""
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    search_dirs = [
-        os.path.join(base_dir, "data", "raw", "audio"),
-        os.path.join(base_dir, "data", "raw", "video"),
-    ]
-    valid_extensions = {".mp3", ".mp4", ".wav", ".m4a", ".flac", ".ogg", ".mkv"}
-    discovered = []
-
-    for search_dir in search_dirs:
-        if os.path.exists(search_dir):
-            for filename in sorted(os.listdir(search_dir)):
-                ext = os.path.splitext(filename)[1].lower()
-                if ext in valid_extensions:
-                    discovered.append(os.path.join(search_dir, filename))
-    return discovered
-
-
-def find_default_raw_audio() -> Optional[str]:
-    """Finds the first available raw audio or video file in data/raw/audio or data/raw/video."""
-    all_files = find_all_raw_audio()
-    return all_files[0] if all_files else None
-
-
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Ingest lecture audio/video into timestamped JSON transcript using OpenAI Whisper."
     )
+    parser.add_argument("--audio", required=True, help="Path to input audio/video file (.mp3, .mp4, .wav, etc.).")
+    parser.add_argument("--course-id", required=True, help="Explicit course identifier.")
+    parser.add_argument("--lecture-id", required=True, help="Explicit lecture identifier.")
+    parser.add_argument("--output", "-o", default=None, help="Optional explicit output JSON path.")
     parser.add_argument(
-        "audio_path",
-        nargs="?",
-        default=None,
-        help="Path to input audio/video file (e.g., .mp4, .mp3, .wav). If omitted, scans data/raw/ for files."
+        "--model",
+        "-m",
+        default="base",
+        choices=["tiny", "base", "small", "medium", "large"],
+        help="Whisper model size (default: base).",
     )
-    parser.add_argument("--output", "-o", help="Optional path to output JSON file")
-    parser.add_argument("--model", "-m", default="base", help="Whisper model size: tiny, base, small, medium (default: base)")
-    parser.add_argument("--lecture-id", "-l", help="Optional lecture ID")
-    parser.add_argument("--all", "-a", action="store_true", help="Batch process all audio/video files found in data/raw/")
+    parser.add_argument("--device", default=None, help="PyTorch device ('cpu', 'cuda').")
+    parser.add_argument("--data-root", default=None, help="Optional custom data root directory.")
 
     args = parser.parse_args()
 
-    # Batch process all files if requested
-    if args.all:
-        files = find_all_raw_audio()
-        if not files:
-            logger.error("No audio/video files found in data/raw/audio or data/raw/video.")
-            return
-        logger.info(f"Found {len(files)} files to transcribe: {[os.path.basename(f) for f in files]}")
-        for filepath in files:
-            try:
-                lid = derive_lecture_id(filepath)
-                logger.info(f"=== Starting transcription for: {os.path.basename(filepath)} (ID: {lid}) ===")
-                saved_path = save_transcript_json(filepath, model_size=args.model, lecture_id=lid)
-                logger.info(f"Finished: {saved_path}")
-            except Exception as e:
-                logger.error(f"Failed to transcribe {filepath}: {e}", exc_info=True)
-        return
-
-    audio_path = args.audio_path
-
-    if not audio_path:
-        audio_path = find_default_raw_audio()
-        if audio_path:
-            logger.info(f"No audio_path specified. Automatically using discovered raw file: {audio_path}")
-        else:
-            logger.error("No audio_path specified and no audio/video files found in data/raw/audio or data/raw/video.")
-            print("\nUsage example:")
-            print("  python backend/ingestion/audio.py data/raw/audio/lecture_01.mp3")
-            print("  python backend/ingestion/audio.py data/raw/video/lecture_02.mp4 --lecture-id lecture_02")
-            print("  python backend/ingestion/audio.py --all --model tiny")
-            return
-
     try:
         saved_path = save_transcript_json(
-            audio_path,
+            audio_path=args.audio,
+            course_id=args.course_id,
+            lecture_id=args.lecture_id,
             output_path=args.output,
             model_size=args.model,
-            lecture_id=args.lecture_id
+            device=args.device,
+            data_root=args.data_root,
         )
         logger.info(f"Successfully transcribed audio into JSON: {saved_path}")
     except Exception as e:
-        logger.error(f"Error processing audio: {e}", exc_info=True)
+        logger.error(f"Error processing audio: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

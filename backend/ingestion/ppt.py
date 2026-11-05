@@ -1,39 +1,53 @@
-import os
-import json
 import argparse
-from typing import Dict, Any, Optional
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.common.paths import (
+    compute_file_sha256,
+    get_lecture_paths,
+    validate_identifier,
+)
 
 
-def derive_lecture_id(file_path: str) -> str:
-    """Derives a lecture ID from a filename by stripping path and extension."""
-    basename = os.path.basename(file_path)
-    lecture_id, _ = os.path.splitext(basename)
-    return lecture_id
-
-
-def extract_ppt_text(ppt_path: str, lecture_id: Optional[str] = None) -> Dict[str, Any]:
+def extract_ppt_text(
+    ppt_path: str,
+    lecture_id: str,
+    course_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Extracts text from a PowerPoint (.pptx) file slide by slide using python-pptx.
 
     Args:
         ppt_path: Path to the input PPTX file.
-        lecture_id: Identifier for the lecture. If None, derived from filename.
+        lecture_id: Explicit identifier for the lecture (required).
+        course_id: Optional course identifier.
 
     Returns:
         Dict containing lecture_id and a list of page objects with 1-indexed slide numbers and text.
     """
-    if not os.path.exists(ppt_path):
+    if not ppt_path or not os.path.exists(ppt_path):
         raise FileNotFoundError(f"PPT file not found at: {ppt_path}")
 
-    if not lecture_id:
-        lecture_id = derive_lecture_id(ppt_path)
+    p = Path(ppt_path).resolve()
+    if p.suffix.lower() not in {".pptx", ".ppt"}:
+        raise ValueError(f"Unsupported PowerPoint format '{p.suffix}'. Expected '.pptx' or '.ppt'.")
+
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
+    valid_course_id = validate_identifier(course_id, "course_id") if course_id is not None else None
 
     try:
         from pptx import Presentation
     except ImportError as e:
         raise ImportError("python-pptx package is required. Install it using: pip install python-pptx") from e
 
-    prs = Presentation(ppt_path)
+    prs = Presentation(str(p))
     pages = []
 
     for idx, slide in enumerate(prs.slides, start=1):
@@ -44,91 +58,73 @@ def extract_ppt_text(ppt_path: str, lecture_id: Optional[str] = None) -> Dict[st
                     text = paragraph.text.strip()
                     if text:
                         slide_text_pieces.append(text)
-        
+
         full_slide_text = "\n".join(slide_text_pieces).strip()
         pages.append({
             "page": idx,
-            "text": full_slide_text
+            "text": full_slide_text,
         })
 
-    return {
-        "lecture_id": lecture_id,
-        "pages": pages
+    payload: Dict[str, Any] = {
+        "lecture_id": valid_lecture_id,
+        "source_file": p.name,
+        "source_sha256": compute_file_sha256(p),
+        "pages": pages,
     }
+    if valid_course_id is not None:
+        payload["course_id"] = valid_course_id
+    return payload
 
 
-def save_ppt_text_json(ppt_path: str, output_path: Optional[str] = None, lecture_id: Optional[str] = None) -> str:
+def save_ppt_text_json(
+    ppt_path: str,
+    course_id: str,
+    lecture_id: str,
+    output_path: Optional[str] = None,
+    data_root: Optional[str] = None,
+) -> str:
     """
-    Extracts text from PPTX and saves it to a JSON file.
-
-    Args:
-        ppt_path: Path to the input PPTX file.
-        output_path: Path where JSON should be saved. If None, defaults to data/processed/pdf_text/<lecture_id>_slides.json.
-        lecture_id: Identifier for the lecture. If None, derived from filename.
-
-    Returns:
-        Path to the saved JSON file.
+    Extracts text from PPTX and saves it to an explicit or lecture-specific JSON path.
     """
-    data = extract_ppt_text(ppt_path, lecture_id=lecture_id)
+    valid_course_id = validate_identifier(course_id, "course_id")
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
 
-    if not output_path:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        output_dir = os.path.join(base_dir, "data", "processed", "pdf_text")
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f"{data['lecture_id']}_slides.json")
+    data = extract_ppt_text(ppt_path=ppt_path, lecture_id=valid_lecture_id, course_id=valid_course_id)
+
+    if output_path:
+        dest = Path(output_path).resolve()
     else:
-        parent_dir = os.path.dirname(os.path.abspath(output_path))
-        if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
+        lpaths = get_lecture_paths(valid_course_id, valid_lecture_id, data_root=data_root)
+        dest = lpaths.processed_dir / "ppt_raw.json"
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-    return output_path
+    return str(dest)
 
 
-def find_default_raw_ppt() -> Optional[str]:
-    """Finds the first available raw PPT/PPTX file in data/raw/ppt or data/raw/pptx."""
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    search_dirs = [
-        os.path.join(base_dir, "data", "raw", "ppt"),
-        os.path.join(base_dir, "data", "raw", "pptx"),
-    ]
-
-    for search_dir in search_dirs:
-        if os.path.exists(search_dir):
-            for filename in os.listdir(search_dir):
-                if filename.lower().endswith((".pptx", ".ppt")):
-                    return os.path.join(search_dir, filename)
-    return None
-
-
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest PowerPoint presentation slides into structured JSON.")
-    parser.add_argument(
-        "ppt_path",
-        nargs="?",
-        default=None,
-        help="Path to input PPTX file. If omitted, scans data/raw/ppt for files."
-    )
-    parser.add_argument("--output", "-o", help="Optional path to output JSON file")
-    parser.add_argument("--lecture-id", "-l", help="Optional lecture ID")
+    parser.add_argument("--ppt", required=True, help="Path to input PPTX file.")
+    parser.add_argument("--course-id", required=True, help="Explicit course identifier.")
+    parser.add_argument("--lecture-id", required=True, help="Explicit lecture identifier.")
+    parser.add_argument("--output", "-o", default=None, help="Optional path to output JSON file.")
+    parser.add_argument("--data-root", default=None, help="Optional custom data root directory.")
 
     args = parser.parse_args()
-    ppt_path = args.ppt_path
-
-    if not ppt_path:
-        ppt_path = find_default_raw_ppt()
-        if ppt_path:
-            print(f"No ppt_path specified. Automatically using discovered raw file: {ppt_path}")
-        else:
-            print("Error: No ppt_path specified and no PPT files found in data/raw/ppt.")
-            print("\nUsage example:")
-            print("  python backend/ingestion/ppt.py data/raw/ppt/lecture_01.pptx")
-            return
-
-    saved_path = save_ppt_text_json(ppt_path, output_path=args.output, lecture_id=args.lecture_id)
-    print(f"Successfully processed PPT into JSON: {saved_path}")
+    try:
+        saved_path = save_ppt_text_json(
+            ppt_path=args.ppt,
+            course_id=args.course_id,
+            lecture_id=args.lecture_id,
+            output_path=args.output,
+            data_root=args.data_root,
+        )
+        print(f"Successfully processed PPT into JSON: {saved_path}")
+    except Exception as e:
+        print(f"Error processing PPT: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

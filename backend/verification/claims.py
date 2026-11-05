@@ -1,188 +1,150 @@
+import argparse
 import csv
+import hashlib
 import json
-import os
+import re
+import sys
 from pathlib import Path
-
-try:
-    from google import genai
-except ImportError:
-    genai = None
-
-
-# --------------------------------------------------
-# Project paths
-# --------------------------------------------------
+from typing import Any, Dict, List, Optional, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-CSV_FILE_V2 = (
-    PROJECT_ROOT
-    / "data"
-    / "raw"
-    / "students"
-    / "lecture_feedback_25_students_v2.csv"
+from backend.common.paths import (
+    get_results_dir,
+    get_student_result_paths,
+    sanitize_student_id,
+    validate_csv_file,
+    validate_identifier,
 )
-
-CSV_FILE_V1 = (
-    PROJECT_ROOT
-    / "data"
-    / "raw"
-    / "students"
-    / "lecture_feedback_25_students.csv"
-)
-
-CSV_FILE = CSV_FILE_V2 if CSV_FILE_V2.exists() else CSV_FILE_V1
-
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "data"
-    / "results"
-)
-
-OUTPUT_FILE = (
-    OUTPUT_DIR
-    / "student_01_claims.json"
-)
+from backend.verification.llm_client import call_llm_json
 
 
-from dotenv import load_dotenv
-import requests
+def load_and_validate_feedback_csv(
+    csv_path: Union[str, Path],
+    student_id_column: str = "roll_number",
+    feedback_column: str = "feedback",
+) -> List[Dict[str, str]]:
+    """
+    Loads and strictly validates a student feedback CSV file:
+      - Verifies file exists and is non-empty .csv
+      - Verifies student_id_column and feedback_column exist in CSV headers
+      - Verifies no missing/invalid/duplicate student IDs (both raw and sanitized)
+      - Verifies no empty student feedback entries
+    """
+    valid_csv = validate_csv_file(csv_path)
+    if not student_id_column or not student_id_column.strip():
+        raise ValueError("student_id_column must be a non-empty column name.")
+    if not feedback_column or not feedback_column.strip():
+        raise ValueError("feedback_column must be a non-empty column name.")
 
-load_dotenv()
+    id_col = student_id_column.strip()
+    fb_col = feedback_column.strip()
 
-openrouter_key = os.getenv("OPENROUTER_API_KEY")
-gemini_key = os.getenv("GEMINI_API_KEY")
+    with open(valid_csv, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        if not fieldnames:
+            raise ValueError(f"Feedback CSV '{valid_csv}' has no header row.")
 
-if not openrouter_key and not gemini_key:
-    raise ValueError("Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is set in .env")
+        missing_cols = [col for col in (id_col, fb_col) if col not in fieldnames]
+        if missing_cols:
+            raise ValueError(
+                f"Missing required CSV column(s) {missing_cols} in '{valid_csv.name}'. "
+                f"Available columns: {fieldnames}"
+            )
 
-if gemini_key and not openrouter_key:
-    client = genai.Client(api_key=gemini_key)
-else:
-    client = None
+        rows = list(reader)
 
+    if not rows:
+        raise ValueError(f"Feedback CSV '{valid_csv.name}' contains no student rows.")
 
-# --------------------------------------------------
-# Load one student's feedback
-# --------------------------------------------------
+    validated_entries: List[Dict[str, str]] = []
+    seen_raw_ids: set[str] = set()
+    seen_sanitized_ids: Dict[str, str] = {}
 
-def load_student_feedback(roll_number):
+    for row_idx, row in enumerate(rows, start=2):  # Row 1 is CSV header
+        raw_id_val = row.get(id_col)
+        if raw_id_val is None or not str(raw_id_val).strip():
+            raise ValueError(
+                f"Missing or empty student identifier in column '{id_col}' at CSV row {row_idx}."
+            )
 
-    with open(
-        CSV_FILE,
-        "r",
-        encoding="utf-8-sig",
-        newline=""
-    ) as file:
+        raw_id = str(raw_id_val).strip()
+        safe_id = sanitize_student_id(raw_id)
 
-        reader = csv.DictReader(file)
+        if raw_id in seen_raw_ids:
+            raise ValueError(
+                f"Duplicate student identifier '{raw_id}' found at CSV row {row_idx}."
+            )
+        if safe_id in seen_sanitized_ids:
+            prev_raw = seen_sanitized_ids[safe_id]
+            raise ValueError(
+                f"Student identifier collision at CSV row {row_idx}: '{raw_id}' and '{prev_raw}' "
+                f"both map to sanitized directory '{safe_id}'."
+            )
 
-        for row in reader:
+        raw_feedback = row.get(fb_col)
+        if raw_feedback is None or not str(raw_feedback).strip():
+            raise ValueError(
+                f"Empty feedback for student '{raw_id}' in column '{fb_col}' at CSV row {row_idx}."
+            )
 
-            if str(row["roll_number"]).strip() == str(roll_number):
+        seen_raw_ids.add(raw_id)
+        seen_sanitized_ids[safe_id] = raw_id
+        validated_entries.append({
+            "student_id": raw_id,
+            "sanitized_id": safe_id,
+            "feedback": str(raw_feedback).strip(),
+        })
 
-                return row["feedback"].strip()
-
-    raise ValueError(
-        f"Roll number {roll_number} not found."
-    )
-
-
-# --------------------------------------------------
-# Extract claims using Gemini or OpenRouter
-# --------------------------------------------------
-
-def extract_claims(feedback):
-
-    prompt = f"""
-You are analyzing a student's summary of a lecture.
-
-Your task is to extract the factual claims made by the student.
-
-A factual claim is a statement that can be checked against
-the actual lecture material.
-
-Rules:
-1. Extract only claims about lecture content.
-2. Do not add information that the student did not state.
-3. Split compound statements into separate claims when useful.
-4. Ignore greetings, opinions, feelings, and vague statements.
-5. Preserve the student's meaning.
-6. Each claim should be understandable on its own.
-7. Return ONLY valid JSON.
-8. Do not include markdown or ```json fences.
-
-Return exactly this structure:
-
-{{
-  "claims": [
-    {{
-      "claim_id": "C01",
-      "text": "..."
-    }}
-  ]
-}}
-
-Student feedback:
-
-{feedback}
-"""
-
-def repair_json(text):
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # Attempt to repair truncated JSON array by finding last closed object
-        last_brace = text.rfind("}")
-        if last_brace != -1:
-            repaired = text[:last_brace+1]
-            if not repaired.endswith("]}"):
-                if not repaired.endswith("]"):
-                    repaired += "]"
-                repaired += "}"
-            try:
-                return json.loads(repaired)
-            except Exception:
-                pass
-        raise
+    return validated_entries
 
 
-def fallback_extract_claims(feedback):
-    sentences = [s.strip() for s in feedback.replace("\n", " ").split(".") if len(s.strip()) > 10]
-    claims = []
-    for idx, s in enumerate(sentences[:10], start=1):
-        claims.append({"claim_id": f"C{idx:02d}", "text": s})
+def fallback_extract_claims(feedback: str) -> Dict[str, Any]:
+    """Deterministic sentence-level claim splitter used when LLM API is unavailable."""
+    normalized = re.sub(r"\s+", " ", feedback.strip())
+    raw_parts = re.split(r"(?<=[.!?;])\s+", normalized)
+    sentences = [
+        s.strip(" .!?;")
+        for s in raw_parts
+        if len(s.strip(" .!?;")) >= 8
+    ]
+    if not sentences and normalized:
+        sentences = [normalized]
+
+    claims = [
+        {"claim_id": f"C{idx:02d}", "text": sentence}
+        for idx, sentence in enumerate(sentences[:12], start=1)
+    ]
     return {"claims": claims}
 
 
-API_CREDITS_EXHAUSTED = False
+def extract_claims(feedback: str, strict_llm: bool = False) -> Dict[str, Any]:
+    """
+    Extracts atomic factual claims from a single student's feedback text.
+    """
+    if not isinstance(feedback, str) or not feedback.strip():
+        raise ValueError("Student feedback cannot be empty for claim extraction.")
 
-def extract_claims(feedback):
-    global API_CREDITS_EXHAUSTED
+    clean_fb = feedback.strip()
 
-    if API_CREDITS_EXHAUSTED:
-        return fallback_extract_claims(feedback)
+    prompt = f"""You are analyzing a student's summary of a lecture.
 
-    prompt = f"""
-You are analyzing a student's summary of a lecture.
+Your task is to extract the key factual claims made by the student (up to 12 claims).
 
-Your task is to extract the 8 to 12 key factual claims made by the student.
-
-A factual claim is a statement that can be checked against
-the actual lecture material.
+A factual claim is a statement that can be checked against the actual lecture material.
 
 Rules:
-1. Extract only main factual claims about lecture content.
+1. Extract only factual claims about lecture content.
 2. Do not add information that the student did not state.
-3. Keep claim descriptions concise (under 15 words each).
-4. Ignore greetings, opinions, feelings, and vague statements.
-5. Return ONLY valid JSON without markdown formatting.
+3. Split compound statements into separate claims when useful.
+4. Ignore greetings, pure opinions, feelings, and vague meta-statements.
+5. Keep each claim concise and understandable on its own.
+6. Return ONLY valid JSON without markdown formatting.
 
 Return exactly this structure:
-
 {{
   "claims": [
     {{
@@ -193,132 +155,160 @@ Return exactly this structure:
 }}
 
 Student feedback:
-
-{feedback}
+{clean_fb}
 """
 
-    if openrouter_key and openrouter_key.startswith("sk-or-"):
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {openrouter_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "google/gemini-2.5-flash",
-            "max_tokens": 120,
-            "messages": [{"role": "user", "content": prompt}]
-        }
-        max_retries = 2
-        res = None
-        for attempt in range(max_retries):
-            res = requests.post(url, headers=headers, json=payload)
-            if res.status_code == 200:
-                break
-            if res.status_code == 402:
-                print("  [Notice] OpenRouter free credits exhausted. Switching instantly to sentence extraction fallback.")
-                API_CREDITS_EXHAUSTED = True
-                return fallback_extract_claims(feedback)
-            if res.status_code in (429, 503) and attempt < max_retries - 1:
-                import time
-                wait_sec = int(res.headers.get("Retry-After", 2 * (attempt + 1)))
-                print(f"  [Rate limit {res.status_code}] Pausing for {wait_sec}s before retry...", flush=True)
-                time.sleep(wait_sec)
-        
-        if res is None or res.status_code != 200:
-            return fallback_extract_claims(feedback)
+    parsed = call_llm_json(prompt=prompt, max_tokens=600, strict_llm=strict_llm)
+    if parsed is None:
+        return fallback_extract_claims(clean_fb)
 
-        response_text = res.json()["choices"][0]["message"]["content"].strip()
-        import time
-        time.sleep(0.5)
-    else:
-        interaction = client.interactions.create(
-            model="gemini-2.5-flash",
-            input=prompt
-        )
-        response_text = interaction.output_text.strip()
+    raw_claims = parsed.get("claims")
+    if not isinstance(raw_claims, list):
+        if strict_llm:
+            raise ValueError("LLM claim extraction response did not contain a valid 'claims' list.")
+        return fallback_extract_claims(clean_fb)
 
-    try:
-        result = repair_json(response_text)
-    except Exception:
-        return fallback_extract_claims(feedback)
+    cleaned_claims: List[Dict[str, str]] = []
+    for idx, item in enumerate(raw_claims, start=1):
+        if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip():
+            cleaned_claims.append({
+                "claim_id": f"C{idx:02d}",
+                "text": item["text"].strip(),
+            })
 
-    return result
+    if not cleaned_claims:
+        return fallback_extract_claims(clean_fb)
+
+    return {"claims": cleaned_claims}
 
 
-# --------------------------------------------------
-# Process Students Function
-# --------------------------------------------------
+def extract_student_claims_to_file(
+    student_id: str,
+    feedback: str,
+    output_path: Union[str, Path],
+    course_id: str,
+    lecture_id: str,
+    strict_llm: bool = False,
+) -> Dict[str, Any]:
+    """
+    Extracts claims for one student and saves explicitly to output_path (claims.json).
+    """
+    valid_course_id = validate_identifier(course_id, "course_id")
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
+    safe_id = sanitize_student_id(student_id)
 
-def process_student(row):
-    roll_number = int(row["roll_number"])
-    out_file = OUTPUT_DIR / f"student_{roll_number:02d}_claims.json"
-    if out_file.exists():
-        try:
-            with open(out_file, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-                if existing.get("claims"):
-                    print(f"  --> Using cached claims for Roll No. {roll_number} ({len(existing['claims'])} claims).")
-                    return existing
-        except Exception:
-            pass
+    if not isinstance(feedback, str) or not feedback.strip():
+        raise ValueError(f"Empty feedback for student '{student_id}'.")
 
-    feedback = row["feedback"].strip()
-    result = extract_claims(feedback)
+    fb_hash = hashlib.sha256(feedback.strip().encode("utf-8")).hexdigest()
+    dest = Path(output_path).resolve()
+
+    result = extract_claims(feedback=feedback, strict_llm=strict_llm)
     claims = result.get("claims", [])
-    output = {
-        "roll_number": roll_number,
-        "claims": claims
+
+    payload = {
+        "student_id": str(student_id).strip(),
+        "sanitized_student_id": safe_id,
+        "course_id": valid_course_id,
+        "lecture_id": valid_lecture_id,
+        "feedback_sha256": fb_hash,
+        "total_claims": len(claims),
+        "claims": claims,
     }
-    with open(out_file, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
 
-    if roll_number == 1:
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            json.dump(output, f, indent=2, ensure_ascii=False)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    return output
+    return payload
 
 
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
+def run_claims_stage(
+    course_id: str,
+    lecture_id: str,
+    feedback_csv: Union[str, Path],
+    results_dir: Union[str, Path],
+    student_id_column: str = "roll_number",
+    feedback_column: str = "feedback",
+    strict_llm: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Executes Step 1 (Claim Extraction) across all students in feedback_csv, writing each student's
+    claims strictly to {results_dir}/{student_id}/claims.json.
+    """
+    valid_course_id = validate_identifier(course_id, "course_id")
+    valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
+    entries = load_and_validate_feedback_csv(
+        csv_path=feedback_csv,
+        student_id_column=student_id_column,
+        feedback_column=feedback_column,
+    )
 
-def main(target_roll_number=None):
-    print("\n===================================")
-    print("CLAIM EXTRACTION")
-    print("===================================")
+    out_root = Path(results_dir).resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    outputs: List[Dict[str, Any]] = []
+    for idx, entry in enumerate(entries, start=1):
+        s_paths = get_student_result_paths(out_root, entry["student_id"])
+        s_paths.ensure_dir()
+        print(
+            f"  [{idx}/{len(entries)}] Extracting claims for student '{entry['student_id']}'...",
+            flush=True,
+        )
+        student_payload = extract_student_claims_to_file(
+            student_id=entry["student_id"],
+            feedback=entry["feedback"],
+            output_path=s_paths.claims,
+            course_id=valid_course_id,
+            lecture_id=valid_lecture_id,
+            strict_llm=strict_llm,
+        )
+        outputs.append(student_payload)
 
-    with open(CSV_FILE, "r", encoding="utf-8-sig", newline="") as file:
-        reader = list(csv.DictReader(file))
+    return outputs
 
-    if target_roll_number is not None:
-        target_rows = [r for r in reader if int(r["roll_number"]) == int(target_roll_number)]
-    else:
-        target_rows = reader
 
-    print(f"\nProcessing {len(target_rows)} student feedback entries...")
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Extract factual claims from student feedback CSV.")
+    parser.add_argument("--course-id", required=True, help="Explicit course identifier.")
+    parser.add_argument("--lecture-id", required=True, help="Explicit lecture identifier.")
+    parser.add_argument("--feedback-csv", required=True, help="Path to student feedback CSV file.")
+    parser.add_argument(
+        "--student-id-column",
+        default="roll_number",
+        help="CSV column containing student identifiers (default: roll_number).",
+    )
+    parser.add_argument(
+        "--feedback-column",
+        default="feedback",
+        help="CSV column containing feedback text (default: feedback).",
+    )
+    parser.add_argument("--output-dir", default=None, help="Optional explicit results directory.")
+    parser.add_argument("--data-root", default=None, help="Optional custom data root directory.")
+    parser.add_argument("--strict-llm", action="store_true", help="Fail immediately on LLM API errors.")
 
-    all_outputs = []
-    for idx, row in enumerate(target_rows, start=1):
-        roll_num = int(row["roll_number"])
-        print(f"\n[{idx}/{len(target_rows)}] Extracting claims for Roll No. {roll_num}...")
-        res = process_student(row)
-        all_outputs.append(res)
-        print(f"  --> Extracted {len(res['claims'])} claims.")
-
-    # Save summary of all extracted claims
-    all_file = OUTPUT_DIR / "all_students_claims.json"
-    with open(all_file, "w", encoding="utf-8") as f:
-        json.dump(all_outputs, f, indent=2, ensure_ascii=False)
-
-    print("\n===================================")
-    print("CLAIM EXTRACTION COMPLETE")
-    print(f"Processed {len(all_outputs)} students. Saved to {OUTPUT_DIR}")
-    print("===================================")
+    args = parser.parse_args(argv)
+    try:
+        res_dir = get_results_dir(
+            course_id=args.course_id,
+            lecture_id=args.lecture_id,
+            data_root=args.data_root,
+            output_dir=args.output_dir,
+        )
+        outputs = run_claims_stage(
+            course_id=args.course_id,
+            lecture_id=args.lecture_id,
+            feedback_csv=args.feedback_csv,
+            results_dir=res_dir,
+            student_id_column=args.student_id_column,
+            feedback_column=args.feedback_column,
+            strict_llm=args.strict_llm,
+        )
+        print(f"\nClaim extraction complete for {len(outputs)} students -> {res_dir}")
+    except Exception as e:
+        print(f"Error during claim extraction: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-

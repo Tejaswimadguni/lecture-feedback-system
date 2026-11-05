@@ -1,26 +1,12 @@
 @echo off
 :: ─────────────────────────────────────────────────────────────────────────────
-:: run_audio.bat  — Transcribe an audio/video file using Whisper (Python 3.11)
+:: run_audio.bat  — Transcribe an audio/video file using Whisper
 ::
 :: Usage:
-::   run_audio.bat <audio_file> [--lecture-id <id>] [--model <tiny|base|small>]
+::   run_audio.bat --audio <audio_file> --course-id <course_id> --lecture-id <lecture_id> [--model <tiny|base|small>]
 ::
-:: Examples:
-::   run_audio.bat data\raw\audio\lecture_01.mp3 --lecture-id lecture_01
-::   run_audio.bat data\raw\audio\lecture_02.mp4 --lecture-id lecture_02 --model tiny
+:: Example:
+::   run_audio.bat --audio data\raw\audio\normalization.mp3 --course-id DBMS --lecture-id DBMS_lect1
 :: ─────────────────────────────────────────────────────────────────────────────
 
-SET PYTHON311=C:\Users\hpkud\AppData\Local\Python\pythoncore-3.11-64\python.exe
-
-IF NOT EXIST "%PYTHON311%" (
-    echo [ERROR] Python 3.11 not found at: %PYTHON311%
-    echo Please install Python 3.11 and run: pip install -r requirements.txt
-    exit /b 1
-)
-
-IF "%1"=="" (
-    echo Usage: run_audio.bat ^<audio_file^> [--lecture-id ^<id^>] [--model ^<tiny^|base^|small^>]
-    exit /b 1
-)
-
-"%PYTHON311%" backend\ingestion\audio.py %*
+python backend\ingestion\audio.py %*
