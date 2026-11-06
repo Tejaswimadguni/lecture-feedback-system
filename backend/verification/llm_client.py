@@ -29,6 +29,20 @@ class LLMAPIError(RuntimeError):
     """Raised when an LLM API call fails and strict_llm mode is enabled."""
 
 
+# Process-wide counters so callers (e.g. the API job runner) can report how many
+# LLM calls succeeded vs. fell back to the deterministic local evaluator.
+LLM_STATS: Dict[str, Any] = {"calls": 0, "succeeded": 0, "fallbacks": 0, "last_error": None}
+
+
+def _record_fallback(reason: str) -> None:
+    LLM_STATS["fallbacks"] += 1
+    LLM_STATS["last_error"] = reason
+
+
+def snapshot_llm_stats() -> Dict[str, Any]:
+    return dict(LLM_STATS)
+
+
 def redact_secrets(message: Any) -> str:
     """Strips any API keys or bearer tokens from log or exception messages."""
     text = str(message)
@@ -86,6 +100,7 @@ def call_llm_json(
     - If strict_llm=False, logs a clear redacted warning and returns None so caller can use deterministic fallback.
     """
     load_dotenv()
+    LLM_STATS["calls"] += 1
     openrouter_key = _get_valid_key("OPENROUTER_API_KEY")
     gemini_key = _get_valid_key("GEMINI_API_KEY")
 
@@ -93,6 +108,7 @@ def call_llm_json(
         msg = "No valid OPENROUTER_API_KEY or GEMINI_API_KEY configured."
         if strict_llm:
             raise LLMAPIError(msg)
+        _record_fallback(msg)
         logger.warning(f"{msg} Using deterministic local fallback.")
         return None
 
@@ -121,7 +137,9 @@ def call_llm_json(
                     data = res.json()
                     response_text = data["choices"][0]["message"]["content"].strip()
                     time.sleep(0.2)
-                    return repair_json(response_text)
+                    parsed_json = repair_json(response_text)
+                    LLM_STATS["succeeded"] += 1
+                    return parsed_json
                 except Exception as exc:
                     last_err = f"OpenRouter response parse failure: {redact_secrets(exc)}"
                     break
@@ -136,6 +154,7 @@ def call_llm_json(
 
         if strict_llm:
             raise LLMAPIError(last_err)
+        _record_fallback(last_err)
         logger.warning(f"{last_err}. Using deterministic local fallback.")
         return None
 
@@ -146,6 +165,7 @@ def call_llm_json(
         msg = f"google-genai package is not installed: {redact_secrets(exc)}"
         if strict_llm:
             raise LLMAPIError(msg) from exc
+        _record_fallback(msg)
         logger.warning(f"{msg}. Using deterministic local fallback.")
         return None
 
@@ -167,10 +187,13 @@ def call_llm_json(
         if not response_text:
             raise ValueError("Empty response received from Gemini API.")
 
-        return repair_json(response_text)
+        parsed_json = repair_json(response_text)
+        LLM_STATS["succeeded"] += 1
+        return parsed_json
     except Exception as exc:
         safe_err = f"Gemini API call failed: {redact_secrets(exc)}"
         if strict_llm:
             raise LLMAPIError(safe_err) from None
+        _record_fallback(safe_err)
         logger.warning(f"{safe_err}. Using deterministic local fallback.")
         return None

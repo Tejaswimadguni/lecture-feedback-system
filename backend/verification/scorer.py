@@ -27,6 +27,25 @@ STATUS_SCORE = {
     "NOT_SUPPORTED": 0.0,
 }
 
+# Letter grade bands applied to the total score out of 10 (inclusive lower bounds).
+# Purely a presentation label: it does not alter the 5 / 3 / 2 rubric.
+GRADE_BANDS = [
+    (9.0, "A+"),
+    (8.0, "A"),
+    (7.0, "B"),
+    (6.0, "C"),
+    (5.0, "D"),
+    (0.0, "F"),
+]
+
+
+def compute_grade(total_score: float) -> str:
+    """Maps a total score (0-10) to its letter grade using GRADE_BANDS."""
+    for lower_bound, label in GRADE_BANDS:
+        if total_score >= lower_bound:
+            return label
+    return "F"
+
 
 def load_lecture_concepts_for_scoring(
     course_id: str,
@@ -273,6 +292,7 @@ def score_student_data(
                 "maximum": ACCURACY_MAX + COVERAGE_MAX + UNDERSTANDING_MAX,
             },
         },
+        "grade": compute_grade(total_score),
         "coverage_details": coverage_details,
         "evaluated_claims": claims,
     }
@@ -349,6 +369,7 @@ def save_all_students_summary(
             "coverage_score": res["scores"]["lecture_coverage"]["score"],
             "understanding_score": res["scores"]["understanding_quality"]["score"],
             "total_score": res["scores"]["total"]["score"],
+            "grade": res.get("grade") or compute_grade(res["scores"]["total"]["score"]),
         })
 
     avg_total = (

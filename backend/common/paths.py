@@ -19,6 +19,7 @@ SUPPORTED_AUDIO_EXTENSIONS = {
     ".webm",
 }
 SUPPORTED_PDF_EXTENSIONS = {".pdf"}
+SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".pptx"}
 
 _FORBIDDEN_ID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _ALNUM_CHECK = re.compile(r"[A-Za-z0-9]")
@@ -114,6 +115,8 @@ class LecturePaths:
     processed_dir: Path
     metadata_dir: Path
     knowledge_base_dir: Path
+    inputs_dir: Path
+    manifest: Path
     transcript_raw: Path
     transcript_clean: Path
     transcript_chunks: Path
@@ -164,6 +167,8 @@ def get_lecture_paths(
         processed_dir=processed_dir,
         metadata_dir=metadata_dir,
         knowledge_base_dir=kb_dir,
+        inputs_dir=lecture_dir / "inputs",
+        manifest=lecture_dir / "lecture.json",
         transcript_raw=processed_dir / "transcript_raw.json",
         transcript_clean=processed_dir / "transcript_clean.json",
         transcript_chunks=processed_dir / "transcript_chunks.json",
@@ -259,6 +264,18 @@ def validate_pdf_file(pdf_path: Optional[Union[str, Path]]) -> Path:
     if ext not in SUPPORTED_PDF_EXTENSIONS:
         raise ValueError(
             f"Unsupported PDF file format '{ext}' for '{p.name}'. Expected '.pdf'."
+        )
+    return p
+
+
+def validate_document_file(doc_path: Optional[Union[str, Path]]) -> Path:
+    """Validates a lecture document (PDF or PPTX slides): exists, non-empty, supported extension."""
+    p = _validate_existing_regular_file(doc_path, "Lecture document")
+    ext = p.suffix.lower()
+    if ext not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        supported = ", ".join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))
+        raise ValueError(
+            f"Unsupported lecture document format '{ext}' for '{p.name}'. Supported formats: {supported}"
         )
     return p
 

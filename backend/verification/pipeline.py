@@ -2,7 +2,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ def run_verification_pipeline(
     output_dir: Optional[Union[str, Path]] = None,
     data_root: Optional[Union[str, Path]] = None,
     strict_llm: bool = False,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """
     Master dynamic pipeline runner for student feedback verification & evaluation.
@@ -56,6 +57,18 @@ def run_verification_pipeline(
     valid_course_id = validate_identifier(course_id, "course_id")
     valid_lecture_id = validate_identifier(lecture_id, "lecture_id")
     valid_csv = validate_csv_file(feedback_csv)
+
+    def _report(step_index: int, title: str, current: Optional[int] = None,
+                total: Optional[int] = None, student_id: Optional[str] = None) -> None:
+        if progress_callback is not None:
+            progress_callback({
+                "stage": title,
+                "stage_index": step_index,
+                "stage_count": 4,
+                "message": f"{title}" + (f" - student '{student_id}'" if student_id else ""),
+                "current": current,
+                "total": total,
+            })
 
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
@@ -111,6 +124,7 @@ def run_verification_pipeline(
     print("[STEP 1/4] Extracting student factual claims...", flush=True)
     for idx, (entry, spaths) in enumerate(student_paths_list, start=1):
         print(f"  [{idx}/{len(student_paths_list)}] Student '{entry['student_id']}' -> {spaths.claims}", flush=True)
+        _report(1, "Claim extraction", idx, len(student_paths_list), entry["student_id"])
         extract_student_claims_to_file(
             student_id=entry["student_id"],
             feedback=entry["feedback"],
@@ -127,6 +141,7 @@ def run_verification_pipeline(
     )
     for idx, (entry, spaths) in enumerate(student_paths_list, start=1):
         print(f"  [{idx}/{len(student_paths_list)}] Student '{entry['student_id']}' -> {spaths.evidence}", flush=True)
+        _report(2, "Evidence retrieval (lecture knowledge base only)", idx, len(student_paths_list), entry["student_id"])
         retrieve_student_evidence_to_file(
             claims_path=spaths.claims,
             output_path=spaths.evidence,
@@ -141,6 +156,7 @@ def run_verification_pipeline(
     print("\n[STEP 3/4] Evaluating claims against retrieved lecture evidence...", flush=True)
     for idx, (entry, spaths) in enumerate(student_paths_list, start=1):
         print(f"  [{idx}/{len(student_paths_list)}] Student '{entry['student_id']}' -> {spaths.evaluated}", flush=True)
+        _report(3, "LLM claim verification", idx, len(student_paths_list), entry["student_id"])
         evaluate_student_evidence_to_file(
             evidence_path=spaths.evidence,
             output_path=spaths.evaluated,
@@ -153,6 +169,7 @@ def run_verification_pipeline(
     print("\n[STEP 4/4] Computing final verification scores & lecture coverage metrics...", flush=True)
     scored_students: List[Dict[str, Any]] = []
     for idx, (entry, spaths) in enumerate(student_paths_list, start=1):
+        _report(4, "Student scoring", idx, len(student_paths_list), entry["student_id"])
         scored = score_student_evaluated_to_file(
             evaluated_path=spaths.evaluated,
             output_path=spaths.score,

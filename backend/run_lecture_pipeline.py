@@ -32,7 +32,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -45,13 +45,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.common.paths import (
     SUPPORTED_AUDIO_EXTENSIONS,
-    SUPPORTED_PDF_EXTENSIONS,
+    SUPPORTED_DOCUMENT_EXTENSIONS,
     compute_file_sha256,
     get_lecture_paths,
     validate_audio_file,
+    validate_document_file,
     validate_identifier,
     validate_non_empty_text,
-    validate_pdf_file,
 )
 from backend.processing.metadata import build_dataset_metadata, validate_chunk
 from backend.processing.pdf_chunker import chunk_pdf
@@ -166,12 +166,31 @@ def run_pipeline(
     data_root: Optional[Union[str, Path]] = None,
     target_word_count: int = 350,
     overlap_word_count: int = 50,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """
     Executes the complete lecture-isolated ingestion, processing, and FAISS indexing pipeline.
+
+    `pdf_path` accepts the lecture document (PDF or PPTX). `progress_callback`, when supplied,
+    receives real progress events: {"stage", "stage_index", "stage_count", "message", "current", "total"}.
     """
     start_time = time.time()
     total_stages = 5
+
+    def _report(stage_num: int, stage_total: int, title: str,
+                current: Optional[int] = None, total: Optional[int] = None,
+                banner: bool = True) -> None:
+        if banner:
+            print_stage_banner(stage_num, stage_total, title)
+        if progress_callback is not None:
+            progress_callback({
+                "stage": title,
+                "stage_index": stage_num,
+                "stage_count": stage_total,
+                "message": title,
+                "current": current,
+                "total": total,
+            })
 
     # 1. Validate mandatory identifiers and descriptive fields
     valid_course_id = validate_identifier(course_id, "course_id")
@@ -206,7 +225,7 @@ def run_pipeline(
             )
 
     valid_audio: Optional[Path] = validate_audio_file(audio_path) if audio_path else None
-    valid_pdf: Optional[Path] = validate_pdf_file(pdf_path) if pdf_path else None
+    valid_pdf: Optional[Path] = validate_document_file(pdf_path) if pdf_path else None
 
     # 2. Construct and create lecture-specific directories
     lpaths = get_lecture_paths(valid_course_id, valid_lecture_id, data_root=data_root)
@@ -224,7 +243,7 @@ def run_pipeline(
 
     if valid_pdf is not None:
         pdf_sha256 = compute_file_sha256(valid_pdf)
-        preserved_pdf = _preserve_raw_file(valid_pdf, lpaths.raw_dir, SUPPORTED_PDF_EXTENSIONS)
+        preserved_pdf = _preserve_raw_file(valid_pdf, lpaths.raw_dir, SUPPORTED_DOCUMENT_EXTENSIONS)
 
     print("\n" + "#" * 70)
     print(" LECTURE FEEDBACK SYSTEM - ISOLATED LECTURE INGESTION PIPELINE")
@@ -243,7 +262,7 @@ def run_pipeline(
     # STAGE 1 & 2: Audio Transcription, Cleaning, and Chunking
     # =========================================================================
     if preserved_audio is not None and audio_sha256 is not None:
-        print_stage_banner(1, total_stages, "Audio Ingestion & Whisper Transcription")
+        _report(1, total_stages, "Audio Ingestion & Whisper Transcription")
 
         cached_transcript = (
             None
@@ -268,13 +287,23 @@ def run_pipeline(
                 f"Transcribing audio '{preserved_audio.name}' using Whisper model '{whisper_model}'..."
             )
             from backend.ingestion.audio import transcribe_audio
-            transcription_result = transcribe_audio(
-                audio_path=str(preserved_audio),
-                lecture_id=valid_lecture_id,
-                course_id=valid_course_id,
-                model_size=whisper_model,
-                device=device,
-            )
+            transcribe_kwargs: Dict[str, Any] = {
+                "audio_path": str(preserved_audio),
+                "lecture_id": valid_lecture_id,
+                "course_id": valid_course_id,
+                "model_size": whisper_model,
+                "device": device,
+            }
+            if progress_callback is not None:
+                transcribe_kwargs["progress_callback"] = lambda cur, tot: _report(
+                    1,
+                    total_stages,
+                    f"Whisper transcription: audio segment {cur} of {tot}",
+                    current=cur,
+                    total=tot,
+                    banner=False,
+                )
+            transcription_result = transcribe_audio(**transcribe_kwargs)
             transcription_result["course_id"] = valid_course_id
             transcription_result["lecture_id"] = valid_lecture_id
             transcription_result["source_file"] = preserved_audio.name
@@ -287,7 +316,7 @@ def run_pipeline(
         raw_segments = transcription_result.get("segments", [])
         logger.info(f"Loaded {len(raw_segments)} raw transcript segments.")
 
-        print_stage_banner(2, total_stages, "Transcript Cleaning & Semantic Chunking")
+        _report(2, total_stages, "Transcript Cleaning & Semantic Chunking")
         cleaned_segments = clean_transcript(raw_segments)
         logger.info(f"Cleaned {len(cleaned_segments)} segments.")
 
@@ -314,8 +343,8 @@ def run_pipeline(
             json.dump(transcript_chunks, f, indent=2, ensure_ascii=False)
         logger.info(f"Constructed {len(transcript_chunks)} transcript chunks -> {lpaths.transcript_chunks}")
     else:
-        print_stage_banner(1, total_stages, "Audio Ingestion (Skipped - PDF-Only Mode)")
-        print_stage_banner(2, total_stages, "Transcript Chunking (Skipped - PDF-Only Mode)")
+        _report(1, total_stages, "Audio Ingestion (Skipped - PDF-Only Mode)")
+        _report(2, total_stages, "Transcript Chunking (Skipped - PDF-Only Mode)")
         for stale_t in (lpaths.transcript_raw, lpaths.transcript_clean, lpaths.transcript_chunks):
             if stale_t.exists():
                 stale_t.unlink()
@@ -324,7 +353,7 @@ def run_pipeline(
     # STAGE 3: PDF Extraction, Cleaning, and Chunking
     # =========================================================================
     if preserved_pdf is not None and pdf_sha256 is not None:
-        print_stage_banner(3, total_stages, "PDF Extraction, Cleaning & Page-Aware Chunking")
+        _report(3, total_stages, "PDF Extraction, Cleaning & Page-Aware Chunking")
 
         cached_pdf = (
             None
@@ -344,13 +373,21 @@ def run_pipeline(
             )
             pdf_raw_data = cached_pdf
         else:
-            logger.info(f"Extracting text from PDF '{preserved_pdf.name}'...")
-            from backend.ingestion.pdf import extract_pdf_text
-            pdf_raw_data = extract_pdf_text(
-                pdf_path=str(preserved_pdf),
-                lecture_id=valid_lecture_id,
-                course_id=valid_course_id,
-            )
+            logger.info(f"Extracting text from document '{preserved_pdf.name}'...")
+            if preserved_pdf.suffix.lower() == ".pptx":
+                from backend.ingestion.ppt import extract_ppt_text
+                pdf_raw_data = extract_ppt_text(
+                    ppt_path=str(preserved_pdf),
+                    lecture_id=valid_lecture_id,
+                    course_id=valid_course_id,
+                )
+            else:
+                from backend.ingestion.pdf import extract_pdf_text
+                pdf_raw_data = extract_pdf_text(
+                    pdf_path=str(preserved_pdf),
+                    lecture_id=valid_lecture_id,
+                    course_id=valid_course_id,
+                )
             pdf_raw_data["course_id"] = valid_course_id
             pdf_raw_data["lecture_id"] = valid_lecture_id
             pdf_raw_data["source_file"] = preserved_pdf.name
@@ -387,7 +424,7 @@ def run_pipeline(
             json.dump(pdf_chunks, f, indent=2, ensure_ascii=False)
         logger.info(f"Constructed {len(pdf_chunks)} PDF chunks -> {lpaths.pdf_chunks}")
     else:
-        print_stage_banner(3, total_stages, "PDF Extraction & Chunking (Skipped - Audio-Only Mode)")
+        _report(3, total_stages, "PDF Extraction & Chunking (Skipped - Audio-Only Mode)")
         for stale_p in (lpaths.pdf_raw, lpaths.pdf_clean, lpaths.pdf_chunks):
             if stale_p.exists():
                 stale_p.unlink()
@@ -395,7 +432,7 @@ def run_pipeline(
     # =========================================================================
     # STAGE 4: Chunk Validation & Lecture-Specific Metadata Consolidation
     # =========================================================================
-    print_stage_banner(4, total_stages, "Chunk Validation & Lecture Metadata")
+    _report(4, total_stages, "Chunk Validation & Lecture Metadata")
     lecture_chunks = transcript_chunks + pdf_chunks
     if not lecture_chunks:
         raise ValueError(
@@ -434,7 +471,7 @@ def run_pipeline(
     # =========================================================================
     # STAGE 5: Independent Lecture Embeddings & FAISS Knowledge Base
     # =========================================================================
-    print_stage_banner(5, total_stages, "Independent Lecture Embeddings & FAISS Indexing")
+    _report(5, total_stages, "Independent Lecture Embeddings & FAISS Indexing")
     kb_summary = build_lecture_index(
         course_id=valid_course_id,
         lecture_id=valid_lecture_id,

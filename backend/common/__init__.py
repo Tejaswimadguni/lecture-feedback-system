@@ -5,6 +5,7 @@ from .paths import (
     DEFAULT_DATA_ROOT,
     SUPPORTED_AUDIO_EXTENSIONS,
     SUPPORTED_PDF_EXTENSIONS,
+    SUPPORTED_DOCUMENT_EXTENSIONS,
     LecturePaths,
     StudentResultPaths,
     validate_identifier,
@@ -16,6 +17,7 @@ from .paths import (
     get_student_result_paths,
     validate_audio_file,
     validate_pdf_file,
+    validate_document_file,
     validate_csv_file,
     compute_file_sha256,
 )
@@ -25,6 +27,7 @@ __all__ = [
     "DEFAULT_DATA_ROOT",
     "SUPPORTED_AUDIO_EXTENSIONS",
     "SUPPORTED_PDF_EXTENSIONS",
+    "SUPPORTED_DOCUMENT_EXTENSIONS",
     "LecturePaths",
     "StudentResultPaths",
     "validate_identifier",
@@ -36,6 +39,7 @@ __all__ = [
     "get_student_result_paths",
     "validate_audio_file",
     "validate_pdf_file",
+    "validate_document_file",
     "validate_csv_file",
     "compute_file_sha256",
 ]

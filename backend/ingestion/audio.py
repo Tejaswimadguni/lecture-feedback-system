@@ -8,7 +8,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+import math
+from typing import Any, Callable, Dict, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -88,6 +89,7 @@ def transcribe_audio(
     model_size: str = "base",
     device: Optional[str] = None,
     chunk_length_sec: int = 180,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Dict[str, Any]:
     """
     Production audio ingestion module using OpenAI Whisper.
@@ -128,6 +130,7 @@ def transcribe_audio(
         try:
             current_start = 0.0
             chunk_index = 0
+            total_chunks = max(1, math.ceil(duration / chunk_length_sec))
 
             while current_start < duration:
                 chunk_file = os.path.join(temp_dir, f"chunk_{chunk_index:04d}.wav")
@@ -135,6 +138,8 @@ def transcribe_audio(
                 logger.info(
                     f"  --> Transcribing chunk {chunk_index + 1} ({current_start:.0f}s - {end_sec:.0f}s)..."
                 )
+                if progress_callback is not None:
+                    progress_callback(chunk_index + 1, total_chunks)
 
                 # Extract 16kHz mono WAV chunk using ffmpeg
                 cmd = [
@@ -174,6 +179,8 @@ def transcribe_audio(
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
     else:
+        if progress_callback is not None:
+            progress_callback(1, 1)
         result = model.transcribe(str(valid_audio))
         raw_segments = result.get("segments", [])
         for seg in raw_segments:

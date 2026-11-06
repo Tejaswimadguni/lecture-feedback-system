@@ -117,7 +117,17 @@ def _ingest_two_dbms_lectures(data_root: Path, work_dir: Path):
         },
     ]
 
-    def fake_transcribe(audio_path: str, lecture_id: str, course_id=None, model_size="base", device=None, chunk_length_sec=180):
+    def fake_transcribe(
+        audio_path: str,
+        lecture_id: str,
+        course_id=None,
+        model_size="base",
+        device=None,
+        chunk_length_sec=180,
+        progress_callback=None,
+    ):
+        if progress_callback is not None:
+            progress_callback(1, 1)
         segs = lect1_segments if lecture_id == "DBMS_lect1" else lect2_segments
         return {
             "course_id": course_id,
@@ -590,7 +600,15 @@ def test_cache_reuse_only_when_identity_and_config_match():
 
         call_counter = {"count": 0}
 
-        def counted_transcribe(audio_path: str, lecture_id: str, course_id=None, model_size="base", device=None, chunk_length_sec=180):
+        def counted_transcribe(
+            audio_path: str,
+            lecture_id: str,
+            course_id=None,
+            model_size="base",
+            device=None,
+            chunk_length_sec=180,
+            progress_callback=None,
+        ):
             call_counter["count"] += 1
             return {
                 "course_id": course_id,

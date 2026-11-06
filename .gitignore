@@ -43,6 +43,7 @@ data/results/*
 !data/results/**/.gitkeep
 backend/data/lectures/
 backend/data/results/
+backend/data/workspace_registry.json
 
 # Model weights & cache files
 *.pt

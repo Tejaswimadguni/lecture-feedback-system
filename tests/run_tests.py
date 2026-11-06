@@ -31,6 +31,10 @@ from tests.test_lecture_isolation_and_verification import (
     test_10_comprehensive_validation_and_error_handling,
     test_cache_reuse_only_when_identity_and_config_match,
 )
+from tests.test_api_and_e2e_workflow import (
+    test_e2e_workflow_tests_1_through_8_and_persistence,
+    test_9_api_validation_error_handling_and_safe_deletion,
+)
 
 
 def run_all_tests():
@@ -52,6 +56,8 @@ def run_all_tests():
         ("test_9_cli_requires_explicit_arguments_no_silent_defaults", test_9_cli_requires_explicit_arguments_no_silent_defaults),
         ("test_10_comprehensive_validation_and_error_handling", test_10_comprehensive_validation_and_error_handling),
         ("test_cache_reuse_only_when_identity_and_config_match", test_cache_reuse_only_when_identity_and_config_match),
+        ("test_e2e_workflow_tests_1_through_8_and_persistence", test_e2e_workflow_tests_1_through_8_and_persistence),
+        ("test_9_api_validation_error_handling_and_safe_deletion", test_9_api_validation_error_handling_and_safe_deletion),
     ]
 
     passed = 0
